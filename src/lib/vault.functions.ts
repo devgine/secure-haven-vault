@@ -181,13 +181,27 @@ export const listSecrets = createServerFn({ method: "GET" })
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
     await requireWorkspacePermission(supabase, userId, data.workspaceId, "secret.read");
-    let query = supabase
+    const cols =
+      "id, workspace_id, type, name, username, url, description, tags, favorite, expires_at, notify_before_days, updated_at";
+    if (data.trashed) {
+      // RLS hides soft-deleted rows from the user client; the trash view is
+      // permission-gated above and reads through the service role instead.
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { data: rows, error } = await supabaseAdmin
+        .from("secrets")
+        .select(cols)
+        .eq("workspace_id", data.workspaceId)
+        .not("deleted_at", "is", null)
+        .order("updated_at", { ascending: false });
+      if (error) throw new Error("Failed to load secrets");
+      return (rows ?? []).map((r) => mapSecret(r as Record<string, unknown>));
+    }
+    const { data: rows, error } = await supabase
       .from("secrets")
-      .select("id, workspace_id, type, name, username, url, description, tags, favorite, expires_at, notify_before_days, updated_at")
+      .select(cols)
       .eq("workspace_id", data.workspaceId)
+      .is("deleted_at", null)
       .order("updated_at", { ascending: false });
-    query = data.trashed ? query.not("deleted_at", "is", null) : query.is("deleted_at", null);
-    const { data: rows, error } = await query;
     if (error) throw new Error("Failed to load secrets");
     return (rows ?? []).map((r) => mapSecret(r as Record<string, unknown>));
   });
