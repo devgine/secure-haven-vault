@@ -12,6 +12,10 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
+import { Route as AuthenticatedFavoritesRouteImport } from './routes/_authenticated/favorites'
+import { Route as AuthenticatedGeneratorRouteImport } from './routes/_authenticated/generator'
+import { Route as AuthenticatedSearchRouteImport } from './routes/_authenticated/search'
+import { Route as AuthenticatedWorkspacesWorkspaceIdRouteImport } from './routes/_authenticated/workspaces/$workspaceId'
 import { Route as ApiPublicOidcCallbackRouteImport } from './routes/api/public/oidc/callback'
 import { Route as ApiPublicOidcStartRouteImport } from './routes/api/public/oidc/start'
 
@@ -29,6 +33,27 @@ const AuthenticatedIndexRoute = AuthenticatedIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedFavoritesRoute = AuthenticatedFavoritesRouteImport.update({
+  id: '/favorites',
+  path: '/favorites',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedGeneratorRoute = AuthenticatedGeneratorRouteImport.update({
+  id: '/generator',
+  path: '/generator',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedSearchRoute = AuthenticatedSearchRouteImport.update({
+  id: '/search',
+  path: '/search',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedWorkspacesWorkspaceIdRoute =
+  AuthenticatedWorkspacesWorkspaceIdRouteImport.update({
+    id: '/workspaces/$workspaceId',
+    path: '/workspaces/$workspaceId',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const ApiPublicOidcCallbackRoute = ApiPublicOidcCallbackRouteImport.update({
   id: '/api/public/oidc/callback',
   path: '/api/public/oidc/callback',
@@ -43,12 +68,20 @@ const ApiPublicOidcStartRoute = ApiPublicOidcStartRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
   '/auth': typeof AuthRoute
+  '/favorites': typeof AuthenticatedFavoritesRoute
+  '/generator': typeof AuthenticatedGeneratorRoute
+  '/search': typeof AuthenticatedSearchRoute
+  '/workspaces/$workspaceId': typeof AuthenticatedWorkspacesWorkspaceIdRoute
   '/api/public/oidc/callback': typeof ApiPublicOidcCallbackRoute
   '/api/public/oidc/start': typeof ApiPublicOidcStartRoute
 }
 export interface FileRoutesByTo {
   '/auth': typeof AuthRoute
+  '/favorites': typeof AuthenticatedFavoritesRoute
+  '/generator': typeof AuthenticatedGeneratorRoute
+  '/search': typeof AuthenticatedSearchRoute
   '/': typeof AuthenticatedIndexRoute
+  '/workspaces/$workspaceId': typeof AuthenticatedWorkspacesWorkspaceIdRoute
   '/api/public/oidc/callback': typeof ApiPublicOidcCallbackRoute
   '/api/public/oidc/start': typeof ApiPublicOidcStartRoute
 }
@@ -56,21 +89,44 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_authenticated': typeof AuthenticatedRouteRouteWithChildren
   '/auth': typeof AuthRoute
+  '/_authenticated/favorites': typeof AuthenticatedFavoritesRoute
+  '/_authenticated/generator': typeof AuthenticatedGeneratorRoute
+  '/_authenticated/search': typeof AuthenticatedSearchRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
+  '/_authenticated/workspaces/$workspaceId': typeof AuthenticatedWorkspacesWorkspaceIdRoute
   '/api/public/oidc/callback': typeof ApiPublicOidcCallbackRoute
   '/api/public/oidc/start': typeof ApiPublicOidcStartRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/auth' | '/api/public/oidc/callback' | '/api/public/oidc/start'
+    | '/'
+    | '/auth'
+    | '/favorites'
+    | '/generator'
+    | '/search'
+    | '/workspaces/$workspaceId'
+    | '/api/public/oidc/callback'
+    | '/api/public/oidc/start'
   fileRoutesByTo: FileRoutesByTo
-  to: '/auth' | '/' | '/api/public/oidc/callback' | '/api/public/oidc/start'
+  to:
+    | '/auth'
+    | '/favorites'
+    | '/generator'
+    | '/search'
+    | '/'
+    | '/workspaces/$workspaceId'
+    | '/api/public/oidc/callback'
+    | '/api/public/oidc/start'
   id:
     | '__root__'
     | '/_authenticated'
     | '/auth'
+    | '/_authenticated/favorites'
+    | '/_authenticated/generator'
+    | '/_authenticated/search'
     | '/_authenticated/'
+    | '/_authenticated/workspaces/$workspaceId'
     | '/api/public/oidc/callback'
     | '/api/public/oidc/start'
   fileRoutesById: FileRoutesById
@@ -105,6 +161,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/favorites': {
+      id: '/_authenticated/favorites'
+      path: '/favorites'
+      fullPath: '/favorites'
+      preLoaderRoute: typeof AuthenticatedFavoritesRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/generator': {
+      id: '/_authenticated/generator'
+      path: '/generator'
+      fullPath: '/generator'
+      preLoaderRoute: typeof AuthenticatedGeneratorRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/search': {
+      id: '/_authenticated/search'
+      path: '/search'
+      fullPath: '/search'
+      preLoaderRoute: typeof AuthenticatedSearchRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/workspaces/$workspaceId': {
+      id: '/_authenticated/workspaces/$workspaceId'
+      path: '/workspaces/$workspaceId'
+      fullPath: '/workspaces/$workspaceId'
+      preLoaderRoute: typeof AuthenticatedWorkspacesWorkspaceIdRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/api/public/oidc/callback': {
       id: '/api/public/oidc/callback'
       path: '/api/public/oidc/callback'
@@ -123,11 +207,20 @@ declare module '@tanstack/react-router' {
 }
 
 interface AuthenticatedRouteRouteChildren {
+  AuthenticatedFavoritesRoute: typeof AuthenticatedFavoritesRoute
+  AuthenticatedGeneratorRoute: typeof AuthenticatedGeneratorRoute
+  AuthenticatedSearchRoute: typeof AuthenticatedSearchRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
+  AuthenticatedWorkspacesWorkspaceIdRoute: typeof AuthenticatedWorkspacesWorkspaceIdRoute
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+  AuthenticatedFavoritesRoute: AuthenticatedFavoritesRoute,
+  AuthenticatedGeneratorRoute: AuthenticatedGeneratorRoute,
+  AuthenticatedSearchRoute: AuthenticatedSearchRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
+  AuthenticatedWorkspacesWorkspaceIdRoute:
+    AuthenticatedWorkspacesWorkspaceIdRoute,
 }
 
 const AuthenticatedRouteRouteWithChildren =
