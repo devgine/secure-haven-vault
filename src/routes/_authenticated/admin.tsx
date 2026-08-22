@@ -2,11 +2,19 @@ import { useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { Ban, ShieldCheck, Trash2 } from "lucide-react";
+import { Ban, Plus, ShieldCheck, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -19,12 +27,15 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  createWorkspaceAdmin,
   deleteUserAccount,
   deleteWorkspaceAdmin,
   getAdminOverview,
+  getPlatformSettings,
   listAllWorkspaces,
   listAuditLogs,
   listUsers,
+  setSignupEnabled,
   setUserAppRole,
   setUserBanned,
   setWorkspaceDisabled,
@@ -50,7 +61,10 @@ export const Route = createFileRoute("/_authenticated/admin")({
 });
 
 function OverviewTab() {
+  const queryClient = useQueryClient();
+  const setSignupFn = useServerFn(setSignupEnabled);
   const { data } = useQuery({ queryKey: ["admin-overview"], queryFn: () => getAdminOverview() });
+  const { data: settings } = useQuery({ queryKey: ["platform-settings"], queryFn: () => getPlatformSettings() });
   const stats = [
     { label: "Utilisateurs", value: data?.userCount ?? "—" },
     { label: "Coffres actifs", value: data?.workspaceCount ?? "—" },
@@ -59,17 +73,51 @@ function OverviewTab() {
     { label: "Échecs de connexion (24 h)", value: data?.failedLoginsLast24h ?? "—" },
   ];
   return (
-    <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-      {stats.map((s) => (
-        <Card key={s.label}>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">{s.label}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-semibold tabular-nums">{s.value}</div>
-          </CardContent>
-        </Card>
-      ))}
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+        {stats.map((s) => (
+          <Card key={s.label}>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-xs font-medium text-muted-foreground">{s.label}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-semibold tabular-nums">{s.value}</div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Inscriptions</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between gap-6">
+            <div className="space-y-1">
+              <p className="text-sm font-medium">Autoriser la création de comptes</p>
+              <p className="max-w-xl text-xs text-muted-foreground">
+                Lorsque désactivé, l'onglet « Créer un compte » et la connexion Google sont masqués
+                sur la page de connexion, et toute nouvelle inscription (email, Google ou SSO) est
+                refusée par la base de données. Les comptes existants peuvent toujours se connecter.
+              </p>
+            </div>
+            <Switch
+              checked={settings?.signupEnabled !== false}
+              onCheckedChange={(enabled) => {
+                void (async () => {
+                  try {
+                    await setSignupFn({ data: { enabled } });
+                    toast.success(enabled ? "Création de comptes autorisée" : "Création de comptes bloquée");
+                    await queryClient.invalidateQueries({ queryKey: ["platform-settings"] });
+                    await queryClient.invalidateQueries({ queryKey: ["signup-enabled"] });
+                  } catch (err) {
+                    toast.error((err as Error).message);
+                  }
+                })();
+              }}
+            />
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
