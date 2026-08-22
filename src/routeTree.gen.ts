@@ -18,6 +18,8 @@ import { Route as AuthenticatedGeneratorRouteImport } from './routes/_authentica
 import { Route as AuthenticatedSearchRouteImport } from './routes/_authenticated/search'
 import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
 import { Route as AuthenticatedWorkspacesWorkspaceIdRouteImport } from './routes/_authenticated/workspaces/$workspaceId'
+import { Route as ApiPublicHealthRouteImport } from './routes/api/public/health'
+import { Route as ApiPublicReadyRouteImport } from './routes/api/public/ready'
 import { Route as ApiPublicOidcCallbackRouteImport } from './routes/api/public/oidc/callback'
 import { Route as ApiPublicOidcStartRouteImport } from './routes/api/public/oidc/start'
 
@@ -66,6 +68,16 @@ const AuthenticatedWorkspacesWorkspaceIdRoute =
     path: '/workspaces/$workspaceId',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const ApiPublicHealthRoute = ApiPublicHealthRouteImport.update({
+  id: '/api/public/health',
+  path: '/api/public/health',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicReadyRoute = ApiPublicReadyRouteImport.update({
+  id: '/api/public/ready',
+  path: '/api/public/ready',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicOidcCallbackRoute = ApiPublicOidcCallbackRouteImport.update({
   id: '/api/public/oidc/callback',
   path: '/api/public/oidc/callback',
@@ -86,6 +98,8 @@ export interface FileRoutesByFullPath {
   '/search': typeof AuthenticatedSearchRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/workspaces/$workspaceId': typeof AuthenticatedWorkspacesWorkspaceIdRoute
+  '/api/public/health': typeof ApiPublicHealthRoute
+  '/api/public/ready': typeof ApiPublicReadyRoute
   '/api/public/oidc/callback': typeof ApiPublicOidcCallbackRoute
   '/api/public/oidc/start': typeof ApiPublicOidcStartRoute
 }
@@ -98,6 +112,8 @@ export interface FileRoutesByTo {
   '/settings': typeof AuthenticatedSettingsRoute
   '/': typeof AuthenticatedIndexRoute
   '/workspaces/$workspaceId': typeof AuthenticatedWorkspacesWorkspaceIdRoute
+  '/api/public/health': typeof ApiPublicHealthRoute
+  '/api/public/ready': typeof ApiPublicReadyRoute
   '/api/public/oidc/callback': typeof ApiPublicOidcCallbackRoute
   '/api/public/oidc/start': typeof ApiPublicOidcStartRoute
 }
@@ -112,6 +128,8 @@ export interface FileRoutesById {
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/workspaces/$workspaceId': typeof AuthenticatedWorkspacesWorkspaceIdRoute
+  '/api/public/health': typeof ApiPublicHealthRoute
+  '/api/public/ready': typeof ApiPublicReadyRoute
   '/api/public/oidc/callback': typeof ApiPublicOidcCallbackRoute
   '/api/public/oidc/start': typeof ApiPublicOidcStartRoute
 }
@@ -126,6 +144,8 @@ export interface FileRouteTypes {
     | '/search'
     | '/settings'
     | '/workspaces/$workspaceId'
+    | '/api/public/health'
+    | '/api/public/ready'
     | '/api/public/oidc/callback'
     | '/api/public/oidc/start'
   fileRoutesByTo: FileRoutesByTo
@@ -138,6 +158,8 @@ export interface FileRouteTypes {
     | '/settings'
     | '/'
     | '/workspaces/$workspaceId'
+    | '/api/public/health'
+    | '/api/public/ready'
     | '/api/public/oidc/callback'
     | '/api/public/oidc/start'
   id:
@@ -151,6 +173,8 @@ export interface FileRouteTypes {
     | '/_authenticated/settings'
     | '/_authenticated/'
     | '/_authenticated/workspaces/$workspaceId'
+    | '/api/public/health'
+    | '/api/public/ready'
     | '/api/public/oidc/callback'
     | '/api/public/oidc/start'
   fileRoutesById: FileRoutesById
@@ -158,6 +182,8 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   AuthenticatedRouteRoute: typeof AuthenticatedRouteRouteWithChildren
   AuthRoute: typeof AuthRoute
+  ApiPublicHealthRoute: typeof ApiPublicHealthRoute
+  ApiPublicReadyRoute: typeof ApiPublicReadyRoute
   ApiPublicOidcCallbackRoute: typeof ApiPublicOidcCallbackRoute
   ApiPublicOidcStartRoute: typeof ApiPublicOidcStartRoute
 }
@@ -227,6 +253,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedWorkspacesWorkspaceIdRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/api/public/health': {
+      id: '/api/public/health'
+      path: '/api/public/health'
+      fullPath: '/api/public/health'
+      preLoaderRoute: typeof ApiPublicHealthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/ready': {
+      id: '/api/public/ready'
+      path: '/api/public/ready'
+      fullPath: '/api/public/ready'
+      preLoaderRoute: typeof ApiPublicReadyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/oidc/callback': {
       id: '/api/public/oidc/callback'
       path: '/api/public/oidc/callback'
@@ -271,6 +311,8 @@ const AuthenticatedRouteRouteWithChildren =
 const rootRouteChildren: RootRouteChildren = {
   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
   AuthRoute: AuthRoute,
+  ApiPublicHealthRoute: ApiPublicHealthRoute,
+  ApiPublicReadyRoute: ApiPublicReadyRoute,
   ApiPublicOidcCallbackRoute: ApiPublicOidcCallbackRoute,
   ApiPublicOidcStartRoute: ApiPublicOidcStartRoute,
 }
