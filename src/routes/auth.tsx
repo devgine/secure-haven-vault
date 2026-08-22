@@ -13,7 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { getPublicOidcProviders } from "@/lib/oidc.functions";
-import { recordAuthEvent } from "@/lib/auth.functions";
+import { getSignupEnabled, recordAuthEvent } from "@/lib/auth.functions";
 
 interface AuthSearch {
   sso_error?: string | undefined;
@@ -59,6 +59,17 @@ function AuthPage() {
     staleTime: 60_000,
   });
 
+  // Quand les inscriptions sont fermées par l'administrateur, on masque
+  // l'onglet de création de compte et la connexion Google (qui créerait un
+  // compte pour un nouvel utilisateur). Le SSO d'entreprise reste visible.
+  const { data: signup } = useQuery({
+    queryKey: ["signup-enabled"],
+    queryFn: () => getSignupEnabled(),
+    staleTime: 30_000,
+  });
+  const signupEnabled = signup?.signupEnabled !== false;
+  const showSso = signupEnabled || (oidcProviders ?? []).length > 0;
+
   const onSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -91,7 +102,11 @@ function AuthPage() {
     });
     setBusy(false);
     if (error) {
-      toast.error(error.message);
+      toast.error(
+        error.message.includes("signup_disabled")
+          ? "La création de comptes est désactivée par l'administrateur"
+          : error.message,
+      );
       return;
     }
     await logAuth({ data: { action: "auth.signup", email } });
@@ -142,10 +157,12 @@ function AuthPage() {
         ) : (
           <div className="rounded-xl border bg-card p-6 shadow-sm">
             <Tabs defaultValue="signin">
-              <TabsList className="grid w-full grid-cols-2">
-                <TabsTrigger value="signin">Connexion</TabsTrigger>
-                <TabsTrigger value="signup">Créer un compte</TabsTrigger>
-              </TabsList>
+              {signupEnabled && (
+                <TabsList className="grid w-full grid-cols-2">
+                  <TabsTrigger value="signin">Connexion</TabsTrigger>
+                  <TabsTrigger value="signup">Créer un compte</TabsTrigger>
+                </TabsList>
+              )}
 
               <TabsContent value="signin" className="pt-4">
                 <form onSubmit={(e) => void onSignIn(e)} className="space-y-4">
@@ -163,6 +180,7 @@ function AuthPage() {
                 </form>
               </TabsContent>
 
+              {signupEnabled && (
               <TabsContent value="signup" className="pt-4">
                 <form onSubmit={(e) => void onSignUp(e)} className="space-y-4">
                   <div className="space-y-2">
@@ -182,27 +200,34 @@ function AuthPage() {
                   </Button>
                 </form>
               </TabsContent>
+              )}
             </Tabs>
 
-            <div className="my-5 flex items-center gap-3">
-              <Separator className="flex-1" />
-              <span className="text-xs text-muted-foreground">ou</span>
-              <Separator className="flex-1" />
-            </div>
+            {showSso && (
+              <>
+                <div className="my-5 flex items-center gap-3">
+                  <Separator className="flex-1" />
+                  <span className="text-xs text-muted-foreground">ou</span>
+                  <Separator className="flex-1" />
+                </div>
 
-            <div className="space-y-2">
-              <Button variant="outline" className="w-full" onClick={() => void onGoogle()}>
-                Continuer avec Google
-              </Button>
-              {(oidcProviders ?? []).map((name) => (
-                <Button key={name} variant="outline" className="w-full" asChild>
-                  <a href="/api/public/oidc/start">
-                    <KeyRound className="mr-2 h-4 w-4" />
-                    SSO — {name}
-                  </a>
-                </Button>
-              ))}
-            </div>
+                <div className="space-y-2">
+                  {signupEnabled && (
+                    <Button variant="outline" className="w-full" onClick={() => void onGoogle()}>
+                      Continuer avec Google
+                    </Button>
+                  )}
+                  {(oidcProviders ?? []).map((name) => (
+                    <Button key={name} variant="outline" className="w-full" asChild>
+                      <a href="/api/public/oidc/start">
+                        <KeyRound className="mr-2 h-4 w-4" />
+                        SSO — {name}
+                      </a>
+                    </Button>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         )}
 

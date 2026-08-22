@@ -2,11 +2,19 @@ import { useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { Ban, ShieldCheck, Trash2 } from "lucide-react";
+import { Ban, Plus, ShieldCheck, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -19,12 +27,15 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  createWorkspaceAdmin,
   deleteUserAccount,
   deleteWorkspaceAdmin,
   getAdminOverview,
+  getPlatformSettings,
   listAllWorkspaces,
   listAuditLogs,
   listUsers,
+  setSignupEnabled,
   setUserAppRole,
   setUserBanned,
   setWorkspaceDisabled,
@@ -50,7 +61,10 @@ export const Route = createFileRoute("/_authenticated/admin")({
 });
 
 function OverviewTab() {
+  const queryClient = useQueryClient();
+  const setSignupFn = useServerFn(setSignupEnabled);
   const { data } = useQuery({ queryKey: ["admin-overview"], queryFn: () => getAdminOverview() });
+  const { data: settings } = useQuery({ queryKey: ["platform-settings"], queryFn: () => getPlatformSettings() });
   const stats = [
     { label: "Utilisateurs", value: data?.userCount ?? "—" },
     { label: "Coffres actifs", value: data?.workspaceCount ?? "—" },
@@ -59,17 +73,51 @@ function OverviewTab() {
     { label: "Échecs de connexion (24 h)", value: data?.failedLoginsLast24h ?? "—" },
   ];
   return (
-    <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-      {stats.map((s) => (
-        <Card key={s.label}>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">{s.label}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-semibold tabular-nums">{s.value}</div>
-          </CardContent>
-        </Card>
-      ))}
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+        {stats.map((s) => (
+          <Card key={s.label}>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-xs font-medium text-muted-foreground">{s.label}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-semibold tabular-nums">{s.value}</div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Inscriptions</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between gap-6">
+            <div className="space-y-1">
+              <p className="text-sm font-medium">Autoriser la création de comptes</p>
+              <p className="max-w-xl text-xs text-muted-foreground">
+                Lorsque désactivé, l'onglet « Créer un compte » et la connexion Google sont masqués
+                sur la page de connexion, et toute nouvelle inscription (email, Google ou SSO) est
+                refusée par la base de données. Les comptes existants peuvent toujours se connecter.
+              </p>
+            </div>
+            <Switch
+              checked={settings?.signupEnabled !== false}
+              onCheckedChange={(enabled) => {
+                void (async () => {
+                  try {
+                    await setSignupFn({ data: { enabled } });
+                    toast.success(enabled ? "Création de comptes autorisée" : "Création de comptes bloquée");
+                    await queryClient.invalidateQueries({ queryKey: ["platform-settings"] });
+                    await queryClient.invalidateQueries({ queryKey: ["signup-enabled"] });
+                  } catch (err) {
+                    toast.error((err as Error).message);
+                  }
+                })();
+              }}
+            />
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -152,20 +200,100 @@ function WorkspacesTab() {
   const queryClient = useQueryClient();
   const disableFn = useServerFn(setWorkspaceDisabled);
   const deleteFn = useServerFn(deleteWorkspaceAdmin);
+  const createFn = useServerFn(createWorkspaceAdmin);
   const { data: workspaces } = useQuery({ queryKey: ["admin-workspaces"], queryFn: () => listAllWorkspaces() });
+  const { data: users } = useQuery({ queryKey: ["admin-users"], queryFn: () => listUsers() });
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newDescription, setNewDescription] = useState("");
+  const [newOwnerId, setNewOwnerId] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  const create = async () => {
+    if (!newName.trim()) return;
+    setCreating(true);
+    try {
+      await createFn({
+        data: {
+          name: newName.trim(),
+          description: newDescription.trim() || undefined,
+          ownerId: newOwnerId || undefined,
+        },
+      });
+      toast.success("Coffre créé");
+      setDialogOpen(false);
+      setNewName("");
+      setNewDescription("");
+      setNewOwnerId("");
+      await queryClient.invalidateQueries({ queryKey: ["admin-workspaces"] });
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setCreating(false);
+    }
+  };
 
   return (
-    <div className="space-y-2">
-      <p className="text-xs text-muted-foreground">
-        L'administration plateforme ne donne jamais accès aux valeurs : les clés de chiffrement
-        sont gérées séparément. La désactivation coupe l'accès de tous les membres.
-      </p>
+    <div className="space-y-3">
+      <div className="flex items-start justify-between gap-4">
+        <p className="text-xs text-muted-foreground">
+          Seuls les coffres d'équipe sont listés ici : les coffres personnels relèvent de leur
+          titulaire et ne peuvent être ni affichés ni désactivés depuis l'administration. La
+          désactivation coupe l'accès de tous les membres — sans jamais donner accès aux valeurs,
+          les clés de chiffrement étant gérées séparément.
+        </p>
+        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+          <DialogTrigger asChild>
+            <Button size="sm" className="shrink-0">
+              <Plus className="mr-1.5 h-3.5 w-3.5" /> Nouveau coffre
+            </Button>
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Créer un coffre d'équipe</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="ws-name">Nom</Label>
+                <Input
+                  id="ws-name"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  placeholder="Équipe Produit"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="ws-desc">Description (optionnel)</Label>
+                <Input id="ws-desc" value={newDescription} onChange={(e) => setNewDescription(e.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label>Propriétaire</Label>
+                <Select value={newOwnerId} onValueChange={setNewOwnerId}>
+                  <SelectTrigger><SelectValue placeholder="Moi-même" /></SelectTrigger>
+                  <SelectContent>
+                    {(users ?? []).map((u) => (
+                      <SelectItem key={u.id} value={u.id}>{u.email ?? u.id}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-[11px] text-muted-foreground">
+                  Le propriétaire devient membre OWNER du coffre. Sans sélection, le coffre vous est attribué.
+                </p>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button onClick={() => void create()} disabled={creating || !newName.trim()}>
+                {creating ? "Création…" : "Créer le coffre"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      </div>
       {(workspaces ?? []).map((w) => (
         <div key={w.id} className="flex flex-wrap items-center gap-3 rounded-lg border bg-card px-4 py-3">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="truncate text-sm font-medium">{w.name}</span>
-              {w.isPersonal && <Badge variant="secondary" className="text-[10px]">Personnel</Badge>}
               {w.disabled && <Badge variant="destructive" className="text-[10px]">Désactivé</Badge>}
             </div>
             <div className="text-xs text-muted-foreground">
@@ -187,29 +315,30 @@ function WorkspacesTab() {
           >
             {w.disabled ? "Réactiver" : "Désactiver"}
           </Button>
-          {!w.isPersonal && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="text-muted-foreground hover:text-destructive"
-              onClick={() => {
-                if (!window.confirm(`Supprimer le coffre « ${w.name} » ?`)) return;
-                void (async () => {
-                  try {
-                    await deleteFn({ data: { workspaceId: w.id } });
-                    await queryClient.invalidateQueries({ queryKey: ["admin-workspaces"] });
-                    toast.success("Coffre supprimé");
-                  } catch (err) {
-                    toast.error((err as Error).message);
-                  }
-                })();
-              }}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="text-muted-foreground hover:text-destructive"
+            onClick={() => {
+              if (!window.confirm(`Supprimer le coffre « ${w.name} » ?`)) return;
+              void (async () => {
+                try {
+                  await deleteFn({ data: { workspaceId: w.id } });
+                  await queryClient.invalidateQueries({ queryKey: ["admin-workspaces"] });
+                  toast.success("Coffre supprimé");
+                } catch (err) {
+                  toast.error((err as Error).message);
+                }
+              })();
+            }}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
         </div>
       ))}
+      {(workspaces ?? []).length === 0 && (
+        <p className="py-8 text-center text-sm text-muted-foreground">Aucun coffre d'équipe pour le moment.</p>
+      )}
     </div>
   );
 }
@@ -407,6 +536,9 @@ const AUDIT_ACTIONS = [
   ["secret.copied", "Copies"],
   ["secret.deleted", "Suppressions"],
   ["member.added", "Ajouts de membres"],
+  ["workspace.created", "Créations de coffres"],
+  ["settings.signup_enabled", "Inscriptions activées"],
+  ["settings.signup_disabled", "Inscriptions bloquées"],
 ] as const;
 
 function AuditTab() {
