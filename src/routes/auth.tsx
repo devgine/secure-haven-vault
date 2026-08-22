@@ -13,7 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { getPublicOidcProviders } from "@/lib/oidc.functions";
-import { recordAuthEvent } from "@/lib/auth.functions";
+import { getSignupEnabled, recordAuthEvent } from "@/lib/auth.functions";
 
 interface AuthSearch {
   sso_error?: string | undefined;
@@ -58,6 +58,17 @@ function AuthPage() {
     queryFn: () => getPublicOidcProviders(),
     staleTime: 60_000,
   });
+
+  // Quand les inscriptions sont fermées par l'administrateur, on masque
+  // l'onglet de création de compte et la connexion Google (qui créerait un
+  // compte pour un nouvel utilisateur). Le SSO d'entreprise reste visible.
+  const { data: signup } = useQuery({
+    queryKey: ["signup-enabled"],
+    queryFn: () => getSignupEnabled(),
+    staleTime: 30_000,
+  });
+  const signupEnabled = signup?.signupEnabled !== false;
+  const showSso = signupEnabled || (oidcProviders ?? []).length > 0;
 
   const onSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
