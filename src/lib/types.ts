@@ -29,15 +29,15 @@ export interface WorkspaceDto {
   disabled: boolean;
   allowViewerReveal: boolean;
   role: WorkspaceRole | null;
-  memberCount?: number;
-  secretCount?: number;
+  memberCount?: number | undefined;
+  secretCount?: number | undefined;
   createdAt: string;
 }
 
 export interface SecretListItem {
   id: string;
   workspaceId: string;
-  workspaceName?: string;
+  workspaceName?: string | undefined;
   type: SecretType;
   name: string;
   username: string | null;
@@ -48,7 +48,7 @@ export interface SecretListItem {
   expiresAt: string | null;
   notifyBeforeDays: number | null;
   updatedAt: string;
-  updatedByEmail?: string | null;
+  updatedByEmail?: string | null | undefined;
 }
 
 export interface SecretFieldMeta {
@@ -61,7 +61,7 @@ export interface SecretFieldMeta {
 
 export interface SecretDetail extends SecretListItem {
   createdAt: string;
-  createdByEmail?: string | null;
+  createdByEmail?: string | null | undefined;
   fields: SecretFieldMeta[];
 }
 
