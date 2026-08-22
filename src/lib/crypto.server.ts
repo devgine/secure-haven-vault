@@ -102,6 +102,27 @@ export function getKeyProvider(): KeyProvider {
   return new EnvKeyProvider();
 }
 
+// Direct master-key encryption for platform-level secrets (e.g. OIDC client
+// secrets) that do not belong to a workspace DEK.
+export async function encryptWithMaster(plaintext: string): Promise<string> {
+  const key = await getMasterKey();
+  const { ciphertext, iv } = await aesGcmEncrypt(
+    key,
+    new TextEncoder().encode(plaintext),
+  );
+  return `v1.${iv}.${ciphertext}`;
+}
+
+export async function decryptWithMaster(stored: string): Promise<string> {
+  const [version, iv, ciphertext] = stored.split(".");
+  if (version !== "v1" || !iv || !ciphertext) {
+    throw new Error("Unsupported ciphertext format");
+  }
+  const key = await getMasterKey();
+  const pt = await aesGcmDecrypt(key, ciphertext, iv);
+  return new TextDecoder().decode(pt);
+}
+
 // Field-level encryption with a workspace DEK.
 // Stored format in secret_fields.ciphertext: "v1.<iv_b64>.<ct_b64>".
 export async function encryptField(dek: Uint8Array, plaintext: string): Promise<string> {
