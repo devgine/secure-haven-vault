@@ -480,16 +480,29 @@ function AdminPage() {
     queryFn: () => getSessionInfo(),
   });
 
-  if (!isLoading && !session?.isSuperAdmin) {
+  // Gate strict : les onglets admin (et leurs requêtes privilégiées) ne sont
+  // montés qu'une fois le rôle SUPER_ADMIN confirmé — jamais pendant le
+  // chargement de la session ni pour un utilisateur non administrateur.
+  if (isLoading) {
+    return (
+      <div className="mx-auto max-w-lg py-20 text-center text-sm text-muted-foreground">
+        Vérification des droits…
+      </div>
+    );
+  }
+
+  if (!session?.isSuperAdmin) {
     return (
       <div className="mx-auto max-w-lg py-20 text-center">
         <ShieldCheck className="mx-auto h-8 w-8 text-muted-foreground/50" />
         <h1 className="mt-3 text-lg font-semibold">Accès réservé</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          La console d'administration est réservée au rôle SUPER_ADMIN.
+          La console d'administration est réservée au rôle SUPER_ADMIN. Votre compte
+          n'a pas ce rôle — seul le premier utilisateur inscrit l'obtient
+          automatiquement (un administrateur peut ensuite l'accorder à d'autres).
         </p>
         <Button variant="outline" className="mt-4" onClick={() => navigate({ to: "/" })}>
-          Retour
+          Retour au tableau de bord
         </Button>
       </div>
     );
