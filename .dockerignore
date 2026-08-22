@@ -1,0 +1,16 @@
+.git
+node_modules
+.output
+.nitro
+.tanstack
+dist
+.env
+.env.*
+!.env.docker.example
+*.log
+Dockerfile
+.dockerignore
+compose.yaml
+DOCKER.md
+README.md
+AGENTS.md
