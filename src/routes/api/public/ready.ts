@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 
 // Sonde de disponibilité (readiness) : l'application répond ET le backend
-# de données est joignable (lecture anonyme d'une table publique).
+// de données est joignable (lecture anonyme d'une table publique).
 export const Route = createFileRoute("/api/public/ready")({
   server: {
     handlers: {
