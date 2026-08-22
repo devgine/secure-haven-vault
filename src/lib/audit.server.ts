@@ -1,4 +1,5 @@
 // Audit logging — server only. NEVER pass secret values here: metadata only.
+import { getDb } from "./db.server";
 
 export interface AuditEvent {
   userId?: string | null;
@@ -13,17 +14,19 @@ export interface AuditEvent {
 
 export async function audit(event: AuditEvent): Promise<void> {
   try {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    await supabaseAdmin.from("audit_logs").insert({
-      user_id: event.userId ?? null,
-      actor_email: event.actorEmail ?? null,
-      workspace_id: event.workspaceId ?? null,
-      action: event.action,
-      target_type: event.targetType ?? null,
-      target_id: event.targetId ?? null,
-      target_label: event.targetLabel ?? null,
-      result: event.result ?? "success",
-    });
+    await getDb()`
+      INSERT INTO audit_logs (user_id, actor_email, workspace_id, action, target_type, target_id, target_label, result)
+      VALUES (
+        ${event.userId ?? null},
+        ${event.actorEmail ?? null},
+        ${event.workspaceId ?? null},
+        ${event.action},
+        ${event.targetType ?? null},
+        ${event.targetId ?? null},
+        ${event.targetLabel ?? null},
+        ${event.result ?? "success"}
+      )
+    `;
   } catch (err) {
     // Auditing must never break the main flow, but we surface the failure
     // server-side for operators.
