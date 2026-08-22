@@ -51,8 +51,8 @@ export const getOidcProvider = createServerFn({ method: "GET" })
     return {
       id: data.id,
       name: data.name,
-      issuerUrl: data.issuer_url,
-      clientId: data.client_id,
+      issuerUrl: data.issuer_url ?? "",
+      clientId: data.client_id ?? "",
       clientSecretSet: data.client_secret_ciphertext != null,
       enabled: data.enabled,
       permissionMode: data.permission_mode as OidcProviderDto["permissionMode"],
@@ -120,17 +120,17 @@ export const listOidcMappings = createServerFn({ method: "GET" })
     if (!provider) return [];
     const { data } = await supabaseAdmin
       .from("oidc_group_mappings")
-      .select("id, idp_group, role, workspaces(id, name)")
+      .select("id, oidc_group, workspace_role, workspaces(id, name)")
       .eq("provider_id", provider.id)
-      .order("idp_group", { ascending: true });
+      .order("oidc_group", { ascending: true });
     return (data ?? []).map((m) => {
       const ws = m.workspaces as unknown as { id: string; name: string } | null;
       return {
         id: m.id,
-        idpGroup: m.idp_group,
+        idpGroup: m.oidc_group,
         workspaceId: ws?.id ?? "",
         workspaceName: ws?.name ?? "",
-        role: m.role as WorkspaceRole,
+        role: (m.workspace_role ?? "VIEWER") as WorkspaceRole,
       };
     });
   });
@@ -158,11 +158,11 @@ export const saveOidcMapping = createServerFn({ method: "POST" })
     const { error } = await supabaseAdmin.from("oidc_group_mappings").upsert(
       {
         provider_id: provider.id,
-        idp_group: data.idpGroup,
+        oidc_group: data.idpGroup,
         workspace_id: data.workspaceId,
-        role: data.role,
+        workspace_role: data.role,
       },
-      { onConflict: "provider_id,idp_group,workspace_id" },
+      { onConflict: "provider_id,oidc_group,workspace_id" },
     );
     if (error) throw new Error("Failed to save mapping");
     await audit({ userId, workspaceId: data.workspaceId, action: "oidc.mapping_saved", targetType: "oidc_mapping", targetLabel: data.idpGroup });
