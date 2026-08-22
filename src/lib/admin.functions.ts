@@ -165,6 +165,7 @@ export const listAllWorkspaces = createServerFn({ method: "GET" })
       .from("workspaces")
       .select("id, name, is_personal, disabled, owner_id, created_at")
       .is("deleted_at", null)
+      .eq("is_personal", false)
       .order("created_at", { ascending: false });
     if (error) throw new Error("Failed to load workspaces");
     const ownerIds = Array.from(new Set((workspaces ?? []).map((w) => w.owner_id)));
@@ -202,7 +203,8 @@ export const setWorkspaceDisabled = createServerFn({ method: "POST" })
     const { supabase, userId } = context;
     await requireSuperAdmin(supabase, userId);
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: ws } = await supabaseAdmin.from("workspaces").select("name").eq("id", data.workspaceId).maybeSingle();
+    const { data: ws } = await supabaseAdmin.from("workspaces").select("name, is_personal").eq("id", data.workspaceId).maybeSingle();
+    if (ws?.is_personal) throw new Error("Les coffres personnels ne peuvent pas être désactivés");
     const { error } = await supabaseAdmin.from("workspaces").update({ disabled: data.disabled }).eq("id", data.workspaceId);
     if (error) throw new Error("Failed to update workspace");
     await audit({
@@ -284,4 +286,75 @@ export const listAuditLogs = createServerFn({ method: "GET" })
       createdAt: r.created_at,
     }));
     return out;
+  });
+
+export const getPlatformSettings = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { supabase, userId } = context;
+    await requireSuperAdmin(supabase, userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data } = await supabaseAdmin
+      .from("platform_settings")
+      .select("value")
+      .eq("key", "signup_enabled")
+      .maybeSingle();
+    return { signupEnabled: data?.value !== false };
+  });
+
+export const setSignupEnabled = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: unknown) => z.object({ enabled: z.boolean() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    await requireSuperAdmin(supabase, userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { error } = await supabaseAdmin
+      .from("platform_settings")
+      .upsert({ key: "signup_enabled", value: data.enabled, updated_at: new Date().toISOString() });
+    if (error) throw new Error("Failed to update platform settings");
+    await audit({
+      userId,
+      action: data.enabled ? "settings.signup_enabled" : "settings.signup_disabled",
+      targetType: "settings",
+      targetLabel: "Création de comptes",
+    });
+    return { ok: true };
+  });
+
+export const createWorkspaceAdmin = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: unknown) =>
+    z.object({
+      name: z.string().min(1).max(100),
+      description: z.string().max(500).optional(),
+      ownerId: z.string().uuid().optional(),
+    }).parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    await requireSuperAdmin(supabase, userId);
+    const ownerId = data.ownerId ?? userId;
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: owner } = await supabaseAdmin.from("profiles").select("id, email").eq("id", ownerId).maybeSingle();
+    if (!owner) throw new Error("Propriétaire introuvable");
+    const { data: ws, error } = await supabaseAdmin
+      .from("workspaces")
+      .insert({ name: data.name, description: data.description ?? null, owner_id: ownerId, is_personal: false })
+      .select("id")
+      .single();
+    if (error || !ws) throw new Error("Failed to create workspace");
+    const { error: memberError } = await supabaseAdmin
+      .from("workspace_members")
+      .insert({ workspace_id: ws.id, user_id: ownerId, role: "OWNER" });
+    if (memberError) throw new Error("Failed to create workspace membership");
+    await audit({
+      userId,
+      workspaceId: ws.id,
+      action: "workspace.created",
+      targetType: "workspace",
+      targetId: ws.id,
+      targetLabel: `${data.name} (admin, propriétaire : ${owner.email ?? ownerId})`,
+    });
+    return { id: ws.id };
   });
