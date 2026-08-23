@@ -227,12 +227,16 @@ export const listSecrets = createServerFn({ method: "GET" })
     const sql = getDb();
     const rows = data.trashed
       ? await sql<SecretRow[]>`
-          SELECT ${sql(SECRET_COLS)} FROM secrets
+          SELECT id, workspace_id, type, name, username, url, description, tags,
+                 favorite, expires_at, notify_before_days, updated_at
+          FROM secrets
           WHERE workspace_id = ${data.workspaceId} AND deleted_at IS NOT NULL
           ORDER BY updated_at DESC
         `
       : await sql<SecretRow[]>`
-          SELECT ${sql(SECRET_COLS)} FROM secrets
+          SELECT id, workspace_id, type, name, username, url, description, tags,
+                 favorite, expires_at, notify_before_days, updated_at
+          FROM secrets
           WHERE workspace_id = ${data.workspaceId} AND deleted_at IS NULL
           ORDER BY updated_at DESC
         `;
@@ -300,7 +304,9 @@ export const getSecret = createServerFn({ method: "GET" })
     const { userId } = context;
     const sql = getDb();
     const rows = await sql<SecretRow[]>`
-      SELECT ${sql(SECRET_COLS)}, created_at, created_by, updated_by
+      SELECT id, workspace_id, type, name, username, url, description, tags,
+             favorite, expires_at, notify_before_days, updated_at,
+             created_at, created_by, updated_by
       FROM secrets
       WHERE id = ${data.secretId} AND deleted_at IS NULL
     `;
