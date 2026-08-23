@@ -1,11 +1,8 @@
 import { useState } from "react";
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useServerFn } from "@tanstack/react-start";
 import { KeyRound, Lock } from "lucide-react";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
-import { lovable } from "@/integrations/lovable";
 import { VaultLogo } from "@/components/vault/logo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { getPublicOidcProviders } from "@/lib/oidc.functions";
-import { getSignupEnabled, recordAuthEvent } from "@/lib/auth.functions";
+import { getCurrentUser, getSignupEnabled, signIn, signUp } from "@/lib/auth.functions";
 
 interface AuthSearch {
   sso_error?: string | undefined;
@@ -27,8 +24,8 @@ export const Route = createFileRoute("/auth")({
     locked: typeof search["locked"] === "string" ? search["locked"] : undefined,
   }),
   beforeLoad: async () => {
-    const { data } = await supabase.auth.getSession();
-    if (data.session) throw redirect({ to: "/" });
+    const user = await getCurrentUser();
+    if (user) throw redirect({ to: "/" });
   },
   head: () => ({
     meta: [
@@ -45,13 +42,11 @@ export const Route = createFileRoute("/auth")({
 function AuthPage() {
   const navigate = useNavigate();
   const { sso_error: ssoError, locked } = Route.useSearch();
-  const logAuth = useServerFn(recordAuthEvent);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
-  const [signupDone, setSignupDone] = useState(false);
 
   const { data: oidcProviders } = useQuery({
     queryKey: ["oidc-providers"],
@@ -60,28 +55,25 @@ function AuthPage() {
   });
 
   // Quand les inscriptions sont fermées par l'administrateur, on masque
-  // l'onglet de création de compte et la connexion Google (qui créerait un
-  // compte pour un nouvel utilisateur). Le SSO d'entreprise reste visible.
+  // l'onglet de création de compte. Le SSO d'entreprise reste visible.
   const { data: signup } = useQuery({
     queryKey: ["signup-enabled"],
     queryFn: () => getSignupEnabled(),
     staleTime: 30_000,
   });
   const signupEnabled = signup?.signupEnabled !== false;
-  const showSso = signupEnabled || (oidcProviders ?? []).length > 0;
+  const ssoProviders = oidcProviders ?? [];
 
   const onSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) {
-      await logAuth({ data: { action: "auth.login_failed", email } });
-      toast.error("Identifiants invalides");
+    try {
+      await signIn({ data: { email, password } });
+      navigate({ to: "/" });
+    } catch (err) {
+      toast.error((err as Error).message || "Identifiants invalides");
       setBusy(false);
-      return;
     }
-    await logAuth({ data: { action: "auth.login", email } });
-    navigate({ to: "/" });
   };
 
   const onSignUp = async (e: React.FormEvent) => {
@@ -95,29 +87,13 @@ function AuthPage() {
       return;
     }
     setBusy(true);
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: { emailRedirectTo: window.location.origin },
-    });
-    setBusy(false);
-    if (error) {
-      toast.error(
-        error.message.includes("signup_disabled")
-          ? "La création de comptes est désactivée par l'administrateur"
-          : error.message,
-      );
-      return;
+    try {
+      await signUp({ data: { email, password } });
+      navigate({ to: "/" });
+    } catch (err) {
+      toast.error((err as Error).message);
+      setBusy(false);
     }
-    await logAuth({ data: { action: "auth.signup", email } });
-    setSignupDone(true);
-  };
-
-  const onGoogle = async () => {
-    const result = await lovable.auth.signInWithOAuth("google", {
-      redirect_uri: window.location.origin,
-    });
-    if (result.error) toast.error("La connexion Google a échoué");
   };
 
   return (
@@ -143,44 +119,32 @@ function AuthPage() {
           </div>
         )}
 
-        {signupDone ? (
-          <div className="rounded-xl border bg-card p-6 text-center shadow-sm">
-            <h2 className="text-lg font-semibold">Vérifiez votre boîte mail</h2>
-            <p className="mt-2 text-sm text-muted-foreground">
-              Un lien de confirmation a été envoyé à <span className="font-medium text-foreground">{email}</span>.
-              Cliquez dessus pour activer votre compte.
-            </p>
-            <Button variant="outline" className="mt-4" onClick={() => setSignupDone(false)}>
-              Retour à la connexion
-            </Button>
-          </div>
-        ) : (
-          <div className="rounded-xl border bg-card p-6 shadow-sm">
-            <Tabs defaultValue="signin">
-              {signupEnabled && (
-                <TabsList className="grid w-full grid-cols-2">
-                  <TabsTrigger value="signin">Connexion</TabsTrigger>
-                  <TabsTrigger value="signup">Créer un compte</TabsTrigger>
-                </TabsList>
-              )}
+        <div className="rounded-xl border bg-card p-6 shadow-sm">
+          <Tabs defaultValue="signin">
+            {signupEnabled && (
+              <TabsList className="grid w-full grid-cols-2">
+                <TabsTrigger value="signin">Connexion</TabsTrigger>
+                <TabsTrigger value="signup">Créer un compte</TabsTrigger>
+              </TabsList>
+            )}
 
-              <TabsContent value="signin" className="pt-4">
-                <form onSubmit={(e) => void onSignIn(e)} className="space-y-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="email">Email</Label>
-                    <Input id="email" type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="password">Mot de passe</Label>
-                    <Input id="password" type="password" required autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
-                  </div>
-                  <Button type="submit" className="w-full" disabled={busy}>
-                    {busy ? "Connexion…" : "Se connecter"}
-                  </Button>
-                </form>
-              </TabsContent>
+            <TabsContent value="signin" className="pt-4">
+              <form onSubmit={(e) => void onSignIn(e)} className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="email">Email</Label>
+                  <Input id="email" type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="password">Mot de passe</Label>
+                  <Input id="password" type="password" required autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+                </div>
+                <Button type="submit" className="w-full" disabled={busy}>
+                  {busy ? "Connexion…" : "Se connecter"}
+                </Button>
+              </form>
+            </TabsContent>
 
-              {signupEnabled && (
+            {signupEnabled && (
               <TabsContent value="signup" className="pt-4">
                 <form onSubmit={(e) => void onSignUp(e)} className="space-y-4">
                   <div className="space-y-2">
@@ -200,36 +164,29 @@ function AuthPage() {
                   </Button>
                 </form>
               </TabsContent>
-              )}
-            </Tabs>
-
-            {showSso && (
-              <>
-                <div className="my-5 flex items-center gap-3">
-                  <Separator className="flex-1" />
-                  <span className="text-xs text-muted-foreground">ou</span>
-                  <Separator className="flex-1" />
-                </div>
-
-                <div className="space-y-2">
-                  {signupEnabled && (
-                    <Button variant="outline" className="w-full" onClick={() => void onGoogle()}>
-                      Continuer avec Google
-                    </Button>
-                  )}
-                  {(oidcProviders ?? []).map((name) => (
-                    <Button key={name} variant="outline" className="w-full" asChild>
-                      <a href="/api/public/oidc/start">
-                        <KeyRound className="mr-2 h-4 w-4" />
-                        SSO — {name}
-                      </a>
-                    </Button>
-                  ))}
-                </div>
-              </>
             )}
-          </div>
-        )}
+          </Tabs>
+
+          {ssoProviders.length > 0 && (
+            <>
+              <div className="my-5 flex items-center gap-3">
+                <Separator className="flex-1" />
+                <span className="text-xs text-muted-foreground">ou</span>
+                <Separator className="flex-1" />
+              </div>
+              <div className="space-y-2">
+                {ssoProviders.map((name) => (
+                  <Button key={name} variant="outline" className="w-full" asChild>
+                    <a href="/api/public/oidc/start">
+                      <KeyRound className="mr-2 h-4 w-4" />
+                      SSO — {name}
+                    </a>
+                  </Button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
 
         <p className="text-center text-xs text-muted-foreground">
           Chaque connexion est tracée dans le journal d'audit.
