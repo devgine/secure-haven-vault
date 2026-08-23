@@ -2,11 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireAuth } from "./auth-middleware";
 import { getDb, iso, isoOrNull } from "./db.server";
-import {
-  getWorkspaceRole,
-  isSuperAdmin,
-  requireWorkspacePermission,
-} from "./vault.server";
+import { isSuperAdmin, requireWorkspacePermission } from "./vault.server";
 import { decryptField, encryptField } from "./crypto.server";
 import { getOrCreateDek } from "./vault.server";
 import { audit } from "./audit.server";

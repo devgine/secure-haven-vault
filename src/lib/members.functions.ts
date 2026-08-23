@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { requireAuth } from "./auth-middleware";
+import { getDb, iso } from "./db.server";
 import { requireWorkspacePermission } from "./vault.server";
 import { audit } from "./audit.server";
 import type { MemberDto } from "./types";
@@ -8,49 +9,48 @@ import type { MemberDto } from "./types";
 const workspaceRoleEnum = z.enum(["OWNER", "ADMIN", "EDITOR", "VIEWER"]);
 
 async function oidcManagesPermissions(): Promise<boolean> {
-  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-  const { data } = await supabaseAdmin
-    .from("oidc_providers")
-    .select("permission_mode")
-    .eq("enabled", true)
-    .limit(1);
-  return (data ?? []).some((p) => p.permission_mode !== "local");
+  const rows = await getDb()<{ permission_mode: string }[]>`
+    SELECT permission_mode FROM oidc_providers WHERE enabled = true LIMIT 5
+  `;
+  return rows.some((p) => p.permission_mode !== "local");
 }
 
 export const listMembers = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .inputValidator((input: unknown) => z.object({ workspaceId: z.string().uuid() }).parse(input))
   .handler(async ({ data, context }) => {
-    const { supabase, userId } = context;
-    await requireWorkspacePermission(supabase, userId, data.workspaceId, "member.read");
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: members, error } = await supabaseAdmin
-      .from("workspace_members")
-      .select("user_id, role, managed_by_oidc, created_at")
-      .eq("workspace_id", data.workspaceId)
-      .order("created_at", { ascending: true });
-    if (error) throw new Error("Failed to load members");
-    const ids = (members ?? []).map((m) => m.user_id);
-    const { data: profiles } = ids.length
-      ? await supabaseAdmin.from("profiles").select("id, email, display_name").in("id", ids)
-      : { data: [] };
-    const byId = new Map((profiles ?? []).map((p) => [p.id, p]));
-    const out: MemberDto[] = (members ?? []).map((m) => {
-      const p = byId.get(m.user_id);
-      return {
-        userId: m.user_id,
-        email: p?.email ?? null,
-        displayName: p?.display_name ?? null,
-        role: m.role,
-        managedByOidc: m.managed_by_oidc,
-        createdAt: m.created_at,
-      };
-    });
+    const { userId } = context;
+    await requireWorkspacePermission(userId, data.workspaceId, "member.read");
+    const members = await getDb()<
+      {
+        user_id: string;
+        role: MemberDto["role"];
+        managed_by_oidc: boolean;
+        created_at: Date | string;
+        email: string | null;
+        display_name: string | null;
+      }[]
+    >`
+      SELECT m.user_id, m.role, m.managed_by_oidc, m.created_at,
+             p.email, p.display_name
+      FROM workspace_members m
+      LEFT JOIN profiles p ON p.id = m.user_id
+      WHERE m.workspace_id = ${data.workspaceId}
+      ORDER BY m.created_at ASC
+    `;
+    const out: MemberDto[] = members.map((m) => ({
+      userId: m.user_id,
+      email: m.email,
+      displayName: m.display_name,
+      role: m.role,
+      managedByOidc: m.managed_by_oidc,
+      createdAt: iso(m.created_at),
+    }));
     return out;
   });
 
 export const addMember = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .inputValidator((input: unknown) =>
     z.object({
       workspaceId: z.string().uuid(),
@@ -59,32 +59,30 @@ export const addMember = createServerFn({ method: "POST" })
     }).parse(input),
   )
   .handler(async ({ data, context }) => {
-    const { supabase, userId } = context;
-    await requireWorkspacePermission(supabase, userId, data.workspaceId, "member.invite");
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { userId } = context;
+    await requireWorkspacePermission(userId, data.workspaceId, "member.invite");
+    const sql = getDb();
 
-    const { data: ws } = await supabaseAdmin
-      .from("workspaces")
-      .select("is_personal, name")
-      .eq("id", data.workspaceId)
-      .single();
-    if (ws?.is_personal) throw new Error("Members cannot be added to a personal vault");
+    const workspaces = await sql<{ is_personal: boolean; name: string }[]>`
+      SELECT is_personal, name FROM workspaces WHERE id = ${data.workspaceId}
+    `;
+    if (workspaces[0]?.is_personal) throw new Error("Members cannot be added to a personal vault");
     if (await oidcManagesPermissions()) {
       throw new Error("Memberships are managed by the identity provider");
     }
 
-    const { data: profile } = await supabaseAdmin
-      .from("profiles")
-      .select("id, email")
-      .ilike("email", data.email.trim())
-      .maybeSingle();
+    const profiles = await sql<{ id: string; email: string | null }[]>`
+      SELECT id, email FROM profiles WHERE lower(email) = lower(${data.email.trim()})
+    `;
+    const profile = profiles[0];
     if (!profile) throw new Error("No account exists for this email address");
 
-    const { error } = await supabaseAdmin.from("workspace_members").upsert(
-      { workspace_id: data.workspaceId, user_id: profile.id, role: data.role, managed_by_oidc: false },
-      { onConflict: "workspace_id,user_id" },
-    );
-    if (error) throw new Error("Failed to add member");
+    await sql`
+      INSERT INTO workspace_members (workspace_id, user_id, role, managed_by_oidc)
+      VALUES (${data.workspaceId}, ${profile.id}, ${data.role}, false)
+      ON CONFLICT (workspace_id, user_id)
+      DO UPDATE SET role = EXCLUDED.role, managed_by_oidc = false
+    `;
     await audit({
       userId,
       workspaceId: data.workspaceId,
@@ -97,7 +95,7 @@ export const addMember = createServerFn({ method: "POST" })
   });
 
 export const updateMemberRole = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .inputValidator((input: unknown) =>
     z.object({
       workspaceId: z.string().uuid(),
@@ -106,34 +104,32 @@ export const updateMemberRole = createServerFn({ method: "POST" })
     }).parse(input),
   )
   .handler(async ({ data, context }) => {
-    const { supabase, userId } = context;
-    await requireWorkspacePermission(supabase, userId, data.workspaceId, "member.update");
+    const { userId } = context;
+    await requireWorkspacePermission(userId, data.workspaceId, "member.update");
     if (await oidcManagesPermissions()) {
       throw new Error("Memberships are managed by the identity provider");
     }
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: target } = await supabaseAdmin
-      .from("workspace_members")
-      .select("role, managed_by_oidc")
-      .eq("workspace_id", data.workspaceId)
-      .eq("user_id", data.targetUserId)
-      .maybeSingle();
+    const sql = getDb();
+    const targets = await sql<{ role: string; managed_by_oidc: boolean }[]>`
+      SELECT role, managed_by_oidc FROM workspace_members
+      WHERE workspace_id = ${data.workspaceId} AND user_id = ${data.targetUserId}
+    `;
+    const target = targets[0];
     if (!target) throw new Error("Member not found");
     if (target.managed_by_oidc) throw new Error("This membership is managed by the identity provider");
     if (target.role === "OWNER" && data.role !== "OWNER") {
-      const { count } = await supabaseAdmin
-        .from("workspace_members")
-        .select("id", { count: "exact", head: true })
-        .eq("workspace_id", data.workspaceId)
-        .eq("role", "OWNER");
-      if ((count ?? 0) <= 1) throw new Error("A workspace must keep at least one owner");
+      const owners = await sql<{ count: string }[]>`
+        SELECT count(*)::text AS count FROM workspace_members
+        WHERE workspace_id = ${data.workspaceId} AND role = 'OWNER'
+      `;
+      if (Number(owners[0]?.count ?? 0) <= 1) {
+        throw new Error("A workspace must keep at least one owner");
+      }
     }
-    const { error } = await supabaseAdmin
-      .from("workspace_members")
-      .update({ role: data.role })
-      .eq("workspace_id", data.workspaceId)
-      .eq("user_id", data.targetUserId);
-    if (error) throw new Error("Failed to update role");
+    await sql`
+      UPDATE workspace_members SET role = ${data.role}
+      WHERE workspace_id = ${data.workspaceId} AND user_id = ${data.targetUserId}
+    `;
     await audit({
       userId,
       workspaceId: data.workspaceId,
@@ -146,30 +142,27 @@ export const updateMemberRole = createServerFn({ method: "POST" })
   });
 
 export const removeMember = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .inputValidator((input: unknown) =>
     z.object({ workspaceId: z.string().uuid(), targetUserId: z.string().uuid() }).parse(input),
   )
   .handler(async ({ data, context }) => {
-    const { supabase, userId } = context;
-    await requireWorkspacePermission(supabase, userId, data.workspaceId, "member.delete");
+    const { userId } = context;
+    await requireWorkspacePermission(userId, data.workspaceId, "member.delete");
     if (await oidcManagesPermissions()) {
       throw new Error("Memberships are managed by the identity provider");
     }
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: ws } = await supabaseAdmin
-      .from("workspaces")
-      .select("is_personal, owner_id")
-      .eq("id", data.workspaceId)
-      .single();
+    const sql = getDb();
+    const workspaces = await sql<{ is_personal: boolean; owner_id: string }[]>`
+      SELECT is_personal, owner_id FROM workspaces WHERE id = ${data.workspaceId}
+    `;
+    const ws = workspaces[0];
     if (ws?.is_personal) throw new Error("Members cannot be removed from a personal vault");
     if (ws?.owner_id === data.targetUserId) throw new Error("The workspace owner cannot be removed");
-    const { error } = await supabaseAdmin
-      .from("workspace_members")
-      .delete()
-      .eq("workspace_id", data.workspaceId)
-      .eq("user_id", data.targetUserId);
-    if (error) throw new Error("Failed to remove member");
+    await sql`
+      DELETE FROM workspace_members
+      WHERE workspace_id = ${data.workspaceId} AND user_id = ${data.targetUserId}
+    `;
     await audit({
       userId,
       workspaceId: data.workspaceId,
