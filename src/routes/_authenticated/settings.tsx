@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -15,6 +15,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { getSessionInfo } from "@/lib/vault.functions";
+import { changePassword as changePasswordFn, updateProfile } from "@/lib/auth.functions";
 
 export const Route = createFileRoute("/_authenticated/settings")({
   head: () => ({
@@ -35,6 +36,8 @@ function applyTheme(theme: string) {
 
 function SettingsPage() {
   const queryClient = useQueryClient();
+  const saveProfileFn = useServerFn(updateProfile);
+  const changePasswordServerFn = useServerFn(changePasswordFn);
   const { data: session } = useQuery({
     queryKey: ["session-info"],
     queryFn: () => getSessionInfo(),
@@ -47,20 +50,20 @@ function SettingsPage() {
 
   const saveProfile = async () => {
     setBusy(true);
-    const { error } = await supabase
-      .from("profiles")
-      .update({
-        display_name: (displayName ?? session?.displayName ?? "") || null,
-        lock_timeout_minutes: Number.parseInt(lockTimeout ?? String(session?.lockTimeoutMinutes ?? 15), 10),
-      })
-      .eq("id", session?.userId ?? "");
-    setBusy(false);
-    if (error) {
-      toast.error("Échec de l'enregistrement");
-      return;
+    try {
+      await saveProfileFn({
+        data: {
+          displayName: (displayName ?? session?.displayName ?? "") || null,
+          lockTimeoutMinutes: Number.parseInt(lockTimeout ?? String(session?.lockTimeoutMinutes ?? 15), 10),
+        },
+      });
+      toast.success("Profil mis à jour");
+      await queryClient.invalidateQueries({ queryKey: ["session-info"] });
+    } catch (err) {
+      toast.error((err as Error).message || "Échec de l'enregistrement");
+    } finally {
+      setBusy(false);
     }
-    toast.success("Profil mis à jour");
-    await queryClient.invalidateQueries({ queryKey: ["session-info"] });
   };
 
   const changePassword = async () => {
@@ -68,13 +71,13 @@ function SettingsPage() {
       toast.error("Le mot de passe doit contenir au moins 12 caractères");
       return;
     }
-    const { error } = await supabase.auth.updateUser({ password: newPassword });
-    if (error) {
-      toast.error(error.message);
-      return;
+    try {
+      await changePasswordServerFn({ data: { newPassword } });
+      setNewPassword("");
+      toast.success("Mot de passe mis à jour — vos autres sessions ont été fermées");
+    } catch (err) {
+      toast.error((err as Error).message);
     }
-    setNewPassword("");
-    toast.success("Mot de passe mis à jour");
   };
 
   return (

@@ -4,218 +4,177 @@ import { requireAuth } from "./auth-middleware";
 import { getDb } from "./db.server";
 import { requireSuperAdmin } from "./vault.server";
 import { audit } from "./audit.server";
-import type { GroupMappingDto, OidcProviderDto } from "./types";
 
-const providerInput = z.object({
-  displayName: z.string().min(1).max(120),
-  issuerUrl: z.string().url().max(500),
-  clientId: z.string().min(1).max(300),
-  clientSecret: z.string().min(1).max(500),
-  scopes: z.string().max(300).optional(),
-  claimMapping: z
-    .object({
-      email: z.string().max(120).optional(),
-      name: z.string().max(120).optional(),
-      groups: z.string().max(120).optional(),
-    })
-    .optional(),
-  groupMappings: z
-    .array(
-      z.object({
-        idpGroup: z.string().min(1).max(200),
-        workspaceId: z.string().uuid(),
-        role: z.enum(["OWNER", "ADMIN", "EDITOR", "VIEWER"]),
-      }),
-    )
-    .optional(),
-  enabled: z.boolean().optional(),
-  permissionMode: z.enum(["local", "hybrid", "oidc"]).optional(),
-  defaultRole: z.enum(["ADMIN", "EDITOR", "VIEWER"]).optional(),
-  defaultWorkspaceIds: z.array(z.string().uuid()).optional(),
-});
+// Modèle mono-fournisseur : une seule ligne dans oidc_providers (Keycloak ou
+// équivalent). Le secret client est chiffré sous la clé maître avant stockage.
+
+const permissionModeEnum = z.enum(["local", "oidc", "hybrid"]);
+const workspaceRoleEnum = z.enum(["OWNER", "ADMIN", "EDITOR", "VIEWER"]);
 
 interface ProviderRow {
   id: string;
-  display_name: string;
-  issuer_url: string;
-  client_id: string;
-  scopes: string;
-  claim_mapping: Record<string, string>;
+  name: string;
   enabled: boolean;
-  permission_mode: "local" | "hybrid" | "oidc";
-  default_role: "ADMIN" | "EDITOR" | "VIEWER" | null;
-  default_workspace_ids: string[] | null;
-  created_at: Date | string;
+  issuer_url: string | null;
+  client_id: string | null;
+  client_secret_ciphertext: string | null;
+  permission_mode: string;
 }
 
-function toIso(v: Date | string): string {
-  return v instanceof Date ? v.toISOString() : String(v);
-}
-
-async function loadProviders(): Promise<OidcProviderDto[]> {
-  const sql = getDb();
-  const providers = await sql<ProviderRow[]>`
-    SELECT id, display_name, issuer_url, client_id, scopes, claim_mapping, enabled,
-           permission_mode, default_role, default_workspace_ids, created_at
-    FROM oidc_providers ORDER BY created_at ASC
+async function getProviderRow() {
+  const rows = await getDb()<ProviderRow[]>`
+    SELECT id, name, enabled, issuer_url, client_id, client_secret_ciphertext, permission_mode
+    FROM oidc_providers
+    ORDER BY created_at ASC
+    LIMIT 1
   `;
-  const mappings = await sql<
-    {
-      id: string;
-      provider_id: string;
-      idp_group: string;
-      workspace_id: string;
-      role: GroupMappingDto["role"];
-      workspace_name: string | null;
-    }[]
-  >`
-    SELECT m.id, m.provider_id, m.idp_group, m.workspace_id, m.role, w.name AS workspace_name
-    FROM oidc_group_mappings m
-    LEFT JOIN workspaces w ON w.id = m.workspace_id
-    ORDER BY m.created_at ASC
-  `;
-  return providers.map((p) => ({
-    id: p.id,
-    displayName: p.display_name,
-    issuerUrl: p.issuer_url,
-    clientId: p.client_id,
-    scopes: p.scopes,
-    claimMapping: p.claim_mapping ?? {},
-    enabled: p.enabled,
-    permissionMode: p.permission_mode,
-    defaultRole: p.default_role,
-    defaultWorkspaceIds: p.default_workspace_ids ?? [],
-    createdAt: toIso(p.created_at),
-    groupMappings: mappings
-      .filter((m) => m.provider_id === p.id)
-      .map((m) => ({
-        id: m.id,
-        idpGroup: m.idp_group,
-        workspaceId: m.workspace_id,
-        role: m.role,
-        workspaceName: m.workspace_name,
-      })),
-  }));
+  return rows[0] ?? null;
 }
 
-export const listOidcProviders = createServerFn({ method: "GET" })
+export const getOidcProvider = createServerFn({ method: "GET" })
   .middleware([requireAuth])
   .handler(async ({ context }) => {
     await requireSuperAdmin(context.userId);
-    return loadProviders();
+    const p = await getProviderRow();
+    if (!p) return null;
+    return {
+      id: p.id,
+      name: p.name,
+      issuerUrl: p.issuer_url ?? "",
+      clientId: p.client_id ?? "",
+      clientSecretSet: Boolean(p.client_secret_ciphertext),
+      enabled: p.enabled,
+      permissionMode: p.permission_mode,
+    };
   });
 
-export const upsertOidcProvider = createServerFn({ method: "POST" })
+export const saveOidcProvider = createServerFn({ method: "POST" })
   .middleware([requireAuth])
   .inputValidator((input: unknown) =>
-    providerInput.extend({ id: z.string().uuid().optional() }).parse(input),
+    z.object({
+      name: z.string().min(1).max(120),
+      issuerUrl: z.string().url().max(500),
+      clientId: z.string().min(1).max(300),
+      clientSecret: z.string().min(1).max(500).optional(),
+      enabled: z.boolean(),
+      permissionMode: permissionModeEnum,
+    }).parse(input),
   )
   .handler(async ({ data, context }) => {
     await requireSuperAdmin(context.userId);
     const sql = getDb();
-    let providerId = data.id;
+    const existing = await getProviderRow();
 
-    if (providerId) {
-      const updated = await sql`
+    let secretCiphertext: string | null = existing?.client_secret_ciphertext ?? null;
+    if (data.clientSecret) {
+      const { encryptWithMaster } = await import("./crypto.server");
+      secretCiphertext = await encryptWithMaster(data.clientSecret);
+    }
+    if (!secretCiphertext) throw new Error("Le secret client est requis");
+
+    if (existing) {
+      await sql`
         UPDATE oidc_providers SET
-          display_name = ${data.displayName},
+          name = ${data.name},
           issuer_url = ${data.issuerUrl},
           client_id = ${data.clientId},
-          client_secret = ${data.clientSecret},
-          scopes = ${data.scopes ?? "openid email profile"},
-          claim_mapping = ${sql.json((data.claimMapping ?? {}) as never)},
-          enabled = ${data.enabled ?? true},
-          permission_mode = ${data.permissionMode ?? "local"},
-          default_role = ${data.defaultRole ?? null},
-          default_workspace_ids = ${data.defaultWorkspaceIds ?? []},
-          updated_at = now()
-        WHERE id = ${providerId}
-        RETURNING id
+          client_secret_ciphertext = ${secretCiphertext},
+          enabled = ${data.enabled},
+          permission_mode = ${data.permissionMode}
+        WHERE id = ${existing.id}
       `;
-      if (!updated[0]) throw new Error("Provider not found");
     } else {
-      const inserted = await sql<{ id: string }[]>`
-        INSERT INTO oidc_providers (
-          display_name, issuer_url, client_id, client_secret, scopes, claim_mapping,
-          enabled, permission_mode, default_role, default_workspace_ids
-        ) VALUES (
-          ${data.displayName}, ${data.issuerUrl}, ${data.clientId}, ${data.clientSecret},
-          ${data.scopes ?? "openid email profile"}, ${sql.json((data.claimMapping ?? {}) as never)},
-          ${data.enabled ?? true}, ${data.permissionMode ?? "local"},
-          ${data.defaultRole ?? null}, ${data.defaultWorkspaceIds ?? []}
-        )
-        RETURNING id
+      await sql`
+        INSERT INTO oidc_providers (name, issuer_url, client_id, client_secret_ciphertext, enabled, permission_mode)
+        VALUES (${data.name}, ${data.issuerUrl}, ${data.clientId}, ${secretCiphertext}, ${data.enabled}, ${data.permissionMode})
       `;
-      providerId = inserted[0]!.id;
     }
-
-    if (data.groupMappings) {
-      await sql`DELETE FROM oidc_group_mappings WHERE provider_id = ${providerId}`;
-      for (const m of data.groupMappings) {
-        await sql`
-          INSERT INTO oidc_group_mappings (provider_id, idp_group, workspace_id, role)
-          VALUES (${providerId}, ${m.idpGroup}, ${m.workspaceId}, ${m.role})
-        `;
-      }
-    }
-
     await audit({
       userId: context.userId,
-      actorEmail: context.email,
-      action: data.id ? "admin.oidc_updated" : "admin.oidc_created",
+      actorEmail: context.userEmail,
+      action: "admin.oidc_updated",
       targetType: "oidc_provider",
-      targetId: providerId,
-      targetLabel: data.displayName,
-    });
-    return { ok: true, id: providerId };
-  });
-
-export const deleteOidcProvider = createServerFn({ method: "POST" })
-  .middleware([requireAuth])
-  .inputValidator((input: unknown) => z.object({ id: z.string().uuid() }).parse(input))
-  .handler(async ({ data, context }) => {
-    await requireSuperAdmin(context.userId);
-    const sql = getDb();
-    const rows = await sql<{ display_name: string }[]>`
-      DELETE FROM oidc_providers WHERE id = ${data.id} RETURNING display_name
-    `;
-    await audit({
-      userId: context.userId,
-      actorEmail: context.email,
-      action: "admin.oidc_deleted",
-      targetType: "oidc_provider",
-      targetId: data.id,
-      targetLabel: rows[0]?.display_name ?? null,
+      targetLabel: data.name,
     });
     return { ok: true };
   });
 
-export const setOidcEnabled = createServerFn({ method: "POST" })
+export const listOidcMappings = createServerFn({ method: "GET" })
+  .middleware([requireAuth])
+  .handler(async ({ context }) => {
+    await requireSuperAdmin(context.userId);
+    const rows = await getDb()<
+      {
+        id: string;
+        oidc_group: string;
+        workspace_id: string;
+        workspace_role: "OWNER" | "ADMIN" | "EDITOR" | "VIEWER";
+        workspace_name: string | null;
+      }[]
+    >`
+      SELECT m.id, m.oidc_group, m.workspace_id, m.workspace_role, w.name AS workspace_name
+      FROM oidc_group_mappings m
+      LEFT JOIN workspaces w ON w.id = m.workspace_id
+      ORDER BY m.created_at ASC
+    `;
+    return rows.map((m) => ({
+      id: m.id,
+      idpGroup: m.oidc_group,
+      workspaceId: m.workspace_id,
+      workspaceName: m.workspace_name,
+      role: m.workspace_role,
+    }));
+  });
+
+export const saveOidcMapping = createServerFn({ method: "POST" })
   .middleware([requireAuth])
   .inputValidator((input: unknown) =>
-    z.object({ id: z.string().uuid(), enabled: z.boolean() }).parse(input),
+    z.object({
+      idpGroup: z.string().min(1).max(200),
+      workspaceId: z.string().uuid(),
+      role: workspaceRoleEnum,
+    }).parse(input),
   )
   .handler(async ({ data, context }) => {
     await requireSuperAdmin(context.userId);
-    await getDb()`
-      UPDATE oidc_providers SET enabled = ${data.enabled}, updated_at = now()
-      WHERE id = ${data.id}
+    const provider = await getProviderRow();
+    if (!provider) throw new Error("Configurez d'abord le fournisseur OIDC");
+    const sql = getDb();
+    await sql`
+      INSERT INTO oidc_group_mappings (provider_id, oidc_group, workspace_id, workspace_role)
+      VALUES (${provider.id}, ${data.idpGroup}, ${data.workspaceId}, ${data.role})
     `;
     await audit({
       userId: context.userId,
-      actorEmail: context.email,
+      actorEmail: context.userEmail,
       action: "admin.oidc_updated",
-      targetType: "oidc_provider",
-      targetId: data.id,
-      targetLabel: data.enabled ? "enabled" : "disabled",
+      targetType: "oidc_mapping",
+      targetLabel: data.idpGroup,
     });
     return { ok: true };
   });
 
-/** Non authentifié : liste les providers actifs pour afficher les boutons SSO sur /auth. */
-export const listEnabledOidcProviders = createServerFn({ method: "GET" }).handler(async () => {
-  const rows = await getDb<{ id: string; display_name: string }[]>`
-    SELECT id, display_name FROM oidc_providers WHERE enabled = true ORDER BY created_at ASC
+export const deleteOidcMapping = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input: unknown) => z.object({ mappingId: z.string().uuid() }).parse(input))
+  .handler(async ({ data, context }) => {
+    await requireSuperAdmin(context.userId);
+    await getDb()`DELETE FROM oidc_group_mappings WHERE id = ${data.mappingId}`;
+    await audit({
+      userId: context.userId,
+      actorEmail: context.userEmail,
+      action: "admin.oidc_updated",
+      targetType: "oidc_mapping",
+      targetId: data.mappingId,
+      targetLabel: "mapping supprimé",
+    });
+    return { ok: true };
+  });
+
+/** Non authentifié : noms des providers actifs, pour les boutons SSO de /auth. */
+export const getPublicOidcProviders = createServerFn({ method: "GET" }).handler(async () => {
+  const rows = await getDb()<{ name: string }[]>`
+    SELECT name FROM oidc_providers WHERE enabled = true ORDER BY created_at ASC
   `;
-  return rows.map((r) => ({ id: r.id, displayName: r.display_name }));
+  return rows.map((r) => r.name);
 });

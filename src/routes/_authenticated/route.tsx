@@ -24,7 +24,6 @@ import {
   Users,
 } from "lucide-react";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
 import { VaultLogo } from "@/components/vault/logo";
 import { Button } from "@/components/ui/button";
 import {
@@ -47,17 +46,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { createWorkspace, getSessionInfo, listWorkspaces } from "@/lib/vault.functions";
-import { recordAuthEvent } from "@/lib/auth.functions";
+import { getCurrentUser, recordAuthEvent, signOut as signOutFn } from "@/lib/auth.functions";
 import { cn } from "@/lib/utils";
 
-// Auth gate for the whole protected subtree. Session lives in localStorage,
-// so the gate is client-side only (ssr: false).
+// Auth gate for the whole protected subtree. La session vit dans un cookie
+// httpOnly validé côté serveur ; la garde reste côté client (ssr: false).
 export const Route = createFileRoute("/_authenticated")({
   ssr: false,
   beforeLoad: async () => {
-    const { data, error } = await supabase.auth.getUser();
-    if (error || !data.user) throw redirect({ to: "/auth" });
-    return { user: data.user };
+    const user = await getCurrentUser();
+    if (!user) throw redirect({ to: "/auth" });
+    return { user };
   },
   component: AuthenticatedShell,
 });
@@ -71,7 +70,7 @@ function useInactivityLock(timeoutMinutes: number) {
     const lock = async () => {
       await queryClient.cancelQueries();
       queryClient.clear();
-      await supabase.auth.signOut();
+      await signOutFn();
       navigate({ to: "/auth", search: { locked: "1" }, replace: true });
     };
     const reset = () => {
@@ -243,7 +242,7 @@ function AuthenticatedShell() {
     if (reason === "logout") {
       await logAuth({ data: { action: "auth.logout", email: session?.email ?? undefined } });
     }
-    await supabase.auth.signOut();
+    await signOutFn();
     navigate({
       to: "/auth",
       search: reason === "lock" ? { locked: "1" } : {},
