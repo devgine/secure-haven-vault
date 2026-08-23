@@ -2,15 +2,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Sentinel Vault — image tout-en-un (SSR + server functions + assets statiques)
 #
-#   docker build \
-#     --build-arg VITE_SUPABASE_URL=https://votre-backend \
-#     --build-arg VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_... \
-#     -t sentinel-vault .
+#   docker build -t sentinel-vault .
 #
-# Les variables VITE_* sont inlinées dans le bundle client AU BUILD (build args).
-# Les variables sensibles (SUPABASE_SERVICE_ROLE_KEY, MASTER_ENCRYPTION_KEY)
-# sont fournies AU RUNTIME via l'environnement (voir compose.yaml) — jamais
-# dans l'image.
+# Aucune variable n'est inlinée au build : toute la configuration (DATABASE_URL,
+# MASTER_ENCRYPTION_KEY) est fournie AU RUNTIME via l'environnement
+# (voir compose.yaml) — jamais dans l'image.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Étape 1 : dépendances ────────────────────────────────────────────────────
@@ -24,13 +20,7 @@ FROM oven/bun:1 AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-ARG VITE_SUPABASE_URL
-ARG VITE_SUPABASE_PUBLISHABLE_KEY
-ARG VITE_SUPABASE_PROJECT_ID=""
-ENV VITE_SUPABASE_URL=${VITE_SUPABASE_URL} \
-    VITE_SUPABASE_PUBLISHABLE_KEY=${VITE_SUPABASE_PUBLISHABLE_KEY} \
-    VITE_SUPABASE_PROJECT_ID=${VITE_SUPABASE_PROJECT_ID} \
-    NITRO_PRESET=node-server
+ENV NITRO_PRESET=node-server
 RUN bun run build
 
 # ── Étape 3 : runtime minimal (non-root) ─────────────────────────────────────
