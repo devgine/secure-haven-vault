@@ -8,16 +8,9 @@
 #   app → application Sentinel Vault (SSR + API), port 3000
 #   db  → PostgreSQL 17 (volume persistant + healthcheck)
 #
-# IMPORTANT — rôle du service `db` :
-#   Par défaut l'application se connecte à votre backend managé Lovable Cloud
-#   (SUPABASE_URL pointe vers lui) : dans ce cas le service `db` ci-dessous
-#   est optionnel et peut être supprimé (retirez aussi le `depends_on`).
-#
-#   Pour un self-hosting COMPLET, la base seule ne suffit pas : l'application
-#   dialogue avec l'API Supabase (PostgREST + Auth/GoTrue). Déployez une stack
-#   Supabase auto-hébergée (voir DOCKER.md, section « Self-hosting complet »)
-#   adossée à ce PostgreSQL, appliquez les migrations de supabase/migrations/,
-#   puis pointez SUPABASE_URL vers votre passerelle API.
+# L'application dialogue DIRECTEMENT avec PostgreSQL (plus de couche Supabase) :
+# authentification par sessions maison (cookie httpOnly), schéma appliqué au
+# premier démarrage via db/init.sql (monté dans docker-entrypoint-initdb.d).
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: sentinel-vault
@@ -26,23 +19,14 @@ services:
   app:
     build:
       context: .
-      args:
-        # Variables publiques inlinées dans le bundle client au build
-        VITE_SUPABASE_URL: ${SUPABASE_URL:?renseignez SUPABASE_URL dans .env}
-        VITE_SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:?renseignez SUPABASE_PUBLISHABLE_KEY dans .env}
-        VITE_SUPABASE_PROJECT_ID: ${SUPABASE_PROJECT_ID:-}
     image: sentinel-vault:latest
     restart: unless-stopped
     ports:
       - "${APP_PORT:-3000}:3000"
     environment:
-      # Runtime serveur (jamais exposées au navigateur)
-      SUPABASE_URL: ${SUPABASE_URL}
-      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY}
-      # Clé service : requise pour l'administration, l'OIDC et les opérations
-      # privilégiées. Indisponible sur Lovable Cloud — laissez vide dans ce cas
-      # (ces fonctions seront désactivées) ou utilisez votre stack auto-hébergée.
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+      # Connexion PostgreSQL directe. Par défaut : le service `db` du compose.
+      # Renseignez DATABASE_URL dans .env pour viser un PostgreSQL externe.
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-vault}:${POSTGRES_PASSWORD:?renseignez POSTGRES_PASSWORD dans .env}@db:5432/${POSTGRES_DB:-vault}}
       # Clé maître de chiffrement AES-256-GCM : openssl rand -hex 32
       MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?générez une clé : openssl rand -hex 32}
       PORT: "3000"
@@ -66,13 +50,15 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-vault}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Schéma appliqué automatiquement au premier démarrage (base vierge)
+      - ./db/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
-    # Décommentez pour administrer la base depuis l'hôte (migrations, psql) :
+    # Décommentez pour administrer la base depuis l'hôte (psql, outils) :
     # ports:
     #   - "5432:5432"
 

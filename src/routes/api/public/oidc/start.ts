@@ -10,14 +10,23 @@ export const Route = createFileRoute("/api/public/oidc/start")({
   server: {
     handlers: {
       GET: async ({ request }) => {
-        const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-        const { data: provider } = await supabaseAdmin
-          .from("oidc_providers")
-          .select("id, issuer_url, client_id, authorization_endpoint, scopes")
-          .eq("enabled", true)
-          .order("created_at", { ascending: true })
-          .limit(1)
-          .maybeSingle();
+        const { getDb } = await import("@/lib/db.server");
+        const rows = await getDb()<
+          {
+            id: string;
+            issuer_url: string | null;
+            client_id: string | null;
+            authorization_endpoint: string | null;
+            scopes: string;
+          }[]
+        >`
+          SELECT id, issuer_url, client_id, authorization_endpoint, scopes
+          FROM oidc_providers
+          WHERE enabled = true
+          ORDER BY created_at ASC
+          LIMIT 1
+        `;
+        const provider = rows[0];
         if (!provider?.client_id || !provider.issuer_url) {
           return new Response("SSO is not configured", { status: 404 });
         }

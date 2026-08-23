@@ -27,14 +27,25 @@ export const Route = createFileRoute("/api/public/oidc/callback")({
           return errorRedirect(origin, "invalid_state");
         }
 
-        const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-        const { data: provider } = await supabaseAdmin
-          .from("oidc_providers")
-          .select("id, issuer_url, client_id, client_secret_ciphertext, token_endpoint, permission_mode")
-          .eq("enabled", true)
-          .order("created_at", { ascending: true })
-          .limit(1)
-          .maybeSingle();
+        const { getDb } = await import("@/lib/db.server");
+        const sql = getDb();
+        const providerRows = await sql<
+          {
+            id: string;
+            issuer_url: string | null;
+            client_id: string | null;
+            client_secret_ciphertext: string | null;
+            token_endpoint: string | null;
+            permission_mode: string;
+          }[]
+        >`
+          SELECT id, issuer_url, client_id, client_secret_ciphertext, token_endpoint, permission_mode
+          FROM oidc_providers
+          WHERE enabled = true
+          ORDER BY created_at ASC
+          LIMIT 1
+        `;
+        const provider = providerRows[0];
         if (!provider?.client_id || !provider.issuer_url || !provider.client_secret_ciphertext) {
           return errorRedirect(origin, "sso_not_configured");
         }
@@ -100,63 +111,67 @@ export const Route = createFileRoute("/api/public/oidc/callback")({
           email.split("@")[0] ??
           email;
 
-        // Find or create the application user.
-        const { data: existingProfile } = await supabaseAdmin
-          .from("profiles")
-          .select("id")
-          .eq("email", email)
-          .maybeSingle();
-        let userId = existingProfile?.id ?? null;
-        if (!userId) {
-          const { data: created, error: createError } = await supabaseAdmin.auth.admin.createUser({
-            email,
-            email_confirm: true,
-            user_metadata: { display_name: displayName },
+        // Find or create the application user (compte provisionné sans mot de
+        // passe local ; les inscriptions fermées bloquent aussi le SSO).
+        const { findOrCreateOidcUser } = await import("@/lib/session.server");
+        let userId: string;
+        try {
+          userId = await findOrCreateOidcUser(email, displayName);
+        } catch (err) {
+          const message = (err as Error).message;
+          return errorRedirect(
+            origin,
+            message === "signup_disabled" ? "signup_disabled" : "user_provisioning_failed",
+          );
+        }
+
+        // Compte bloqué : refus de la session.
+        const userRows = await sql<{ banned_until: Date | string | null }[]>`
+          SELECT banned_until FROM users WHERE id = ${userId}
+        `;
+        const bannedUntil = userRows[0]?.banned_until;
+        if (bannedUntil && new Date(bannedUntil).getTime() > Date.now()) {
+          await audit({
+            userId,
+            actorEmail: email,
+            action: "auth.login_failed",
+            targetType: "auth",
+            result: "failure",
+            targetLabel: "account_banned",
           });
-          if (createError || !created.user) {
-            return errorRedirect(origin, "user_provisioning_failed");
-          }
-          userId = created.user.id;
+          return errorRedirect(origin, "account_banned");
         }
 
         // Synchronize workspace memberships from IdP group mappings.
         if (provider.permission_mode !== "local") {
-          const { data: mappings } = await supabaseAdmin
-            .from("oidc_group_mappings")
-            .select("workspace_id, workspace_role, oidc_group")
-            .eq("provider_id", provider.id)
-            .in("oidc_group", groups.length ? groups : ["__none__"]);
+          const mappings = await sql<
+            { workspace_id: string | null; workspace_role: string | null; oidc_group: string }[]
+          >`
+            SELECT workspace_id, workspace_role, oidc_group
+            FROM oidc_group_mappings
+            WHERE provider_id = ${provider.id}
+              AND oidc_group = ANY(${groups.length ? groups : ["__none__"]})
+          `;
 
-          await supabaseAdmin
-            .from("workspace_members")
-            .delete()
-            .eq("user_id", userId)
-            .eq("managed_by_oidc", true);
+          await sql`
+            DELETE FROM workspace_members WHERE user_id = ${userId} AND managed_by_oidc = true
+          `;
 
-          for (const m of mappings ?? []) {
+          for (const m of mappings) {
             if (!m.workspace_id || !m.workspace_role) continue;
-            // Never downgrade the owner of a personal vault.
-            await supabaseAdmin.from("workspace_members").upsert(
-              {
-                workspace_id: m.workspace_id,
-                user_id: userId,
-                role: m.workspace_role,
-                managed_by_oidc: true,
-              },
-              { onConflict: "workspace_id,user_id" },
-            );
+            await sql`
+              INSERT INTO workspace_members (workspace_id, user_id, role, managed_by_oidc)
+              VALUES (${m.workspace_id}, ${userId}, ${m.workspace_role}::workspace_role, true)
+              ON CONFLICT (workspace_id, user_id)
+              DO UPDATE SET role = EXCLUDED.role, managed_by_oidc = true
+            `;
           }
         }
 
-        // Issue a session for the verified SSO identity.
-        const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
-          type: "magiclink",
-          email,
-          options: { redirectTo: `${origin}/` },
-        });
-        if (linkError || !linkData.properties?.action_link) {
-          return errorRedirect(origin, "session_failed");
-        }
+        // Émet une session applicative (cookie httpOnly, empreinte SHA-256 en base).
+        const { createSession } = await import("@/lib/session.server");
+        const session = await createSession(userId);
+        await sql`UPDATE users SET last_sign_in_at = now() WHERE id = ${userId}`;
 
         await audit({
           userId,
@@ -166,13 +181,18 @@ export const Route = createFileRoute("/api/public/oidc/callback")({
           targetLabel: provider.issuer_url,
         });
 
+        const secure = url.protocol === "https:" ? "; Secure" : "";
         return new Response(null, {
           status: 302,
-          headers: {
-            Location: linkData.properties.action_link,
-            "Set-Cookie": "oidc_state=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0",
-            "Cache-Control": "no-store",
-          },
+          headers: [
+            ["Location", `${origin}/`],
+            ["Set-Cookie", "oidc_state=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0"],
+            [
+              "Set-Cookie",
+              `vault_session=${encodeURIComponent(session.token)}; Path=/; HttpOnly; SameSite=Lax${secure}; Max-Age=${7 * 24 * 3600}`,
+            ],
+            ["Cache-Control", "no-store"],
+          ],
         });
       },
     },
