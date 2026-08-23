@@ -1,183 +1,221 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { requireAuth } from "./auth-middleware";
+import { getDb } from "./db.server";
 import { requireSuperAdmin } from "./vault.server";
-import { encryptWithMaster } from "./crypto.server";
 import { audit } from "./audit.server";
-import type { WorkspaceRole } from "./permissions";
+import type { GroupMappingDto, OidcProviderDto } from "./types";
 
-export interface OidcProviderDto {
-  id: string;
-  name: string;
-  issuerUrl: string;
-  clientId: string;
-  clientSecretSet: boolean;
-  enabled: boolean;
-  permissionMode: "oidc" | "local" | "hybrid";
-}
-
-export interface OidcMappingDto {
-  id: string;
-  idpGroup: string;
-  workspaceId: string;
-  workspaceName: string;
-  role: WorkspaceRole;
-}
-
-/** Public: the login page lists enabled SSO providers. */
-export const getPublicOidcProviders = createServerFn({ method: "GET" }).handler(async () => {
-  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-  const { data } = await supabaseAdmin
-    .from("oidc_providers")
-    .select("name")
-    .eq("enabled", true)
-    .order("created_at", { ascending: true });
-  return (data ?? []).map((p) => p.name);
+const providerInput = z.object({
+  displayName: z.string().min(1).max(120),
+  issuerUrl: z.string().url().max(500),
+  clientId: z.string().min(1).max(300),
+  clientSecret: z.string().min(1).max(500),
+  scopes: z.string().max(300).optional(),
+  claimMapping: z
+    .object({
+      email: z.string().max(120).optional(),
+      name: z.string().max(120).optional(),
+      groups: z.string().max(120).optional(),
+    })
+    .optional(),
+  groupMappings: z
+    .array(
+      z.object({
+        idpGroup: z.string().min(1).max(200),
+        workspaceId: z.string().uuid(),
+        role: z.enum(["OWNER", "ADMIN", "EDITOR", "VIEWER"]),
+      }),
+    )
+    .optional(),
+  enabled: z.boolean().optional(),
+  permissionMode: z.enum(["local", "hybrid", "oidc"]).optional(),
+  defaultRole: z.enum(["ADMIN", "EDITOR", "VIEWER"]).optional(),
+  defaultWorkspaceIds: z.array(z.string().uuid()).optional(),
 });
 
-export const getOidcProvider = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
-  .handler(async ({ context }): Promise<OidcProviderDto | null> => {
-    const { supabase, userId } = context;
-    await requireSuperAdmin(supabase, userId);
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data } = await supabaseAdmin
-      .from("oidc_providers")
-      .select("id, name, issuer_url, client_id, client_secret_ciphertext, enabled, permission_mode")
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (!data) return null;
-    return {
-      id: data.id,
-      name: data.name,
-      issuerUrl: data.issuer_url ?? "",
-      clientId: data.client_id ?? "",
-      clientSecretSet: data.client_secret_ciphertext != null,
-      enabled: data.enabled,
-      permissionMode: data.permission_mode as OidcProviderDto["permissionMode"],
-    };
-  });
+interface ProviderRow {
+  id: string;
+  display_name: string;
+  issuer_url: string;
+  client_id: string;
+  scopes: string;
+  claim_mapping: Record<string, string>;
+  enabled: boolean;
+  permission_mode: "local" | "hybrid" | "oidc";
+  default_role: "ADMIN" | "EDITOR" | "VIEWER" | null;
+  default_workspace_ids: string[] | null;
+  created_at: Date | string;
+}
 
-export const saveOidcProvider = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input: unknown) =>
-    z.object({
-      name: z.string().min(1).max(100),
-      issuerUrl: z.string().url().max(2000),
-      clientId: z.string().min(1).max(500),
-      clientSecret: z.string().max(2000).optional(),
-      enabled: z.boolean(),
-      permissionMode: z.enum(["oidc", "local", "hybrid"]),
-    }).parse(input),
-  )
-  .handler(async ({ data, context }) => {
-    const { supabase, userId } = context;
-    await requireSuperAdmin(supabase, userId);
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+function toIso(v: Date | string): string {
+  return v instanceof Date ? v.toISOString() : String(v);
+}
 
-    const { data: existing } = await supabaseAdmin
-      .from("oidc_providers")
-      .select("id, client_secret_ciphertext")
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
-
-    let ciphertext = existing?.client_secret_ciphertext ?? null;
-    if (data.clientSecret && data.clientSecret.length > 0) {
-      ciphertext = await encryptWithMaster(data.clientSecret);
-    }
-    if (!ciphertext) throw new Error("A client secret is required");
-
-    const payload = {
-      name: data.name,
-      issuer_url: data.issuerUrl.replace(/\/$/, ""),
-      client_id: data.clientId,
-      client_secret_ciphertext: ciphertext,
-      enabled: data.enabled,
-      permission_mode: data.permissionMode,
-    };
-    const { error } = existing
-      ? await supabaseAdmin.from("oidc_providers").update(payload).eq("id", existing.id)
-      : await supabaseAdmin.from("oidc_providers").insert(payload);
-    if (error) throw new Error("Failed to save provider");
-    await audit({ userId, action: "oidc.provider_saved", targetType: "oidc_provider", targetLabel: data.name });
-    return { ok: true };
-  });
-
-export const listOidcMappings = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
-  .handler(async ({ context }): Promise<OidcMappingDto[]> => {
-    const { supabase, userId } = context;
-    await requireSuperAdmin(supabase, userId);
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: provider } = await supabaseAdmin
-      .from("oidc_providers")
-      .select("id")
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (!provider) return [];
-    const { data } = await supabaseAdmin
-      .from("oidc_group_mappings")
-      .select("id, oidc_group, workspace_role, workspaces(id, name)")
-      .eq("provider_id", provider.id)
-      .order("oidc_group", { ascending: true });
-    return (data ?? []).map((m) => {
-      const ws = m.workspaces as unknown as { id: string; name: string } | null;
-      return {
+async function loadProviders(): Promise<OidcProviderDto[]> {
+  const sql = getDb();
+  const providers = await sql<ProviderRow[]>`
+    SELECT id, display_name, issuer_url, client_id, scopes, claim_mapping, enabled,
+           permission_mode, default_role, default_workspace_ids, created_at
+    FROM oidc_providers ORDER BY created_at ASC
+  `;
+  const mappings = await sql<
+    {
+      id: string;
+      provider_id: string;
+      idp_group: string;
+      workspace_id: string;
+      role: GroupMappingDto["role"];
+      workspace_name: string | null;
+    }[]
+  >`
+    SELECT m.id, m.provider_id, m.idp_group, m.workspace_id, m.role, w.name AS workspace_name
+    FROM oidc_group_mappings m
+    LEFT JOIN workspaces w ON w.id = m.workspace_id
+    ORDER BY m.created_at ASC
+  `;
+  return providers.map((p) => ({
+    id: p.id,
+    displayName: p.display_name,
+    issuerUrl: p.issuer_url,
+    clientId: p.client_id,
+    scopes: p.scopes,
+    claimMapping: p.claim_mapping ?? {},
+    enabled: p.enabled,
+    permissionMode: p.permission_mode,
+    defaultRole: p.default_role,
+    defaultWorkspaceIds: p.default_workspace_ids ?? [],
+    createdAt: toIso(p.created_at),
+    groupMappings: mappings
+      .filter((m) => m.provider_id === p.id)
+      .map((m) => ({
         id: m.id,
-        idpGroup: m.oidc_group,
-        workspaceId: ws?.id ?? "",
-        workspaceName: ws?.name ?? "",
-        role: (m.workspace_role ?? "VIEWER") as WorkspaceRole,
-      };
-    });
+        idpGroup: m.idp_group,
+        workspaceId: m.workspace_id,
+        role: m.role,
+        workspaceName: m.workspace_name,
+      })),
+  }));
+}
+
+export const listOidcProviders = createServerFn({ method: "GET" })
+  .middleware([requireAuth])
+  .handler(async ({ context }) => {
+    await requireSuperAdmin(context.userId);
+    return loadProviders();
   });
 
-export const saveOidcMapping = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
+export const upsertOidcProvider = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
   .inputValidator((input: unknown) =>
-    z.object({
-      idpGroup: z.string().min(1).max(200),
-      workspaceId: z.string().uuid(),
-      role: z.enum(["OWNER", "ADMIN", "EDITOR", "VIEWER"]),
-    }).parse(input),
+    providerInput.extend({ id: z.string().uuid().optional() }).parse(input),
   )
   .handler(async ({ data, context }) => {
-    const { supabase, userId } = context;
-    await requireSuperAdmin(supabase, userId);
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: provider } = await supabaseAdmin
-      .from("oidc_providers")
-      .select("id")
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (!provider) throw new Error("Configure an OIDC provider first");
-    const { error } = await supabaseAdmin.from("oidc_group_mappings").upsert(
-      {
-        provider_id: provider.id,
-        oidc_group: data.idpGroup,
-        workspace_id: data.workspaceId,
-        workspace_role: data.role,
-      },
-      { onConflict: "provider_id,oidc_group,workspace_id" },
-    );
-    if (error) throw new Error("Failed to save mapping");
-    await audit({ userId, workspaceId: data.workspaceId, action: "oidc.mapping_saved", targetType: "oidc_mapping", targetLabel: data.idpGroup });
+    await requireSuperAdmin(context.userId);
+    const sql = getDb();
+    let providerId = data.id;
+
+    if (providerId) {
+      const updated = await sql`
+        UPDATE oidc_providers SET
+          display_name = ${data.displayName},
+          issuer_url = ${data.issuerUrl},
+          client_id = ${data.clientId},
+          client_secret = ${data.clientSecret},
+          scopes = ${data.scopes ?? "openid email profile"},
+          claim_mapping = ${sql.json((data.claimMapping ?? {}) as never)},
+          enabled = ${data.enabled ?? true},
+          permission_mode = ${data.permissionMode ?? "local"},
+          default_role = ${data.defaultRole ?? null},
+          default_workspace_ids = ${data.defaultWorkspaceIds ?? []},
+          updated_at = now()
+        WHERE id = ${providerId}
+        RETURNING id
+      `;
+      if (!updated[0]) throw new Error("Provider not found");
+    } else {
+      const inserted = await sql<{ id: string }[]>`
+        INSERT INTO oidc_providers (
+          display_name, issuer_url, client_id, client_secret, scopes, claim_mapping,
+          enabled, permission_mode, default_role, default_workspace_ids
+        ) VALUES (
+          ${data.displayName}, ${data.issuerUrl}, ${data.clientId}, ${data.clientSecret},
+          ${data.scopes ?? "openid email profile"}, ${sql.json((data.claimMapping ?? {}) as never)},
+          ${data.enabled ?? true}, ${data.permissionMode ?? "local"},
+          ${data.defaultRole ?? null}, ${data.defaultWorkspaceIds ?? []}
+        )
+        RETURNING id
+      `;
+      providerId = inserted[0]!.id;
+    }
+
+    if (data.groupMappings) {
+      await sql`DELETE FROM oidc_group_mappings WHERE provider_id = ${providerId}`;
+      for (const m of data.groupMappings) {
+        await sql`
+          INSERT INTO oidc_group_mappings (provider_id, idp_group, workspace_id, role)
+          VALUES (${providerId}, ${m.idpGroup}, ${m.workspaceId}, ${m.role})
+        `;
+      }
+    }
+
+    await audit({
+      userId: context.userId,
+      actorEmail: context.email,
+      action: data.id ? "admin.oidc_updated" : "admin.oidc_created",
+      targetType: "oidc_provider",
+      targetId: providerId,
+      targetLabel: data.displayName,
+    });
+    return { ok: true, id: providerId };
+  });
+
+export const deleteOidcProvider = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input: unknown) => z.object({ id: z.string().uuid() }).parse(input))
+  .handler(async ({ data, context }) => {
+    await requireSuperAdmin(context.userId);
+    const sql = getDb();
+    const rows = await sql<{ display_name: string }[]>`
+      DELETE FROM oidc_providers WHERE id = ${data.id} RETURNING display_name
+    `;
+    await audit({
+      userId: context.userId,
+      actorEmail: context.email,
+      action: "admin.oidc_deleted",
+      targetType: "oidc_provider",
+      targetId: data.id,
+      targetLabel: rows[0]?.display_name ?? null,
+    });
     return { ok: true };
   });
 
-export const deleteOidcMapping = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input: unknown) => z.object({ mappingId: z.string().uuid() }).parse(input))
+export const setOidcEnabled = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input: unknown) =>
+    z.object({ id: z.string().uuid(), enabled: z.boolean() }).parse(input),
+  )
   .handler(async ({ data, context }) => {
-    const { supabase, userId } = context;
-    await requireSuperAdmin(supabase, userId);
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { error } = await supabaseAdmin.from("oidc_group_mappings").delete().eq("id", data.mappingId);
-    if (error) throw new Error("Failed to delete mapping");
-    await audit({ userId, action: "oidc.mapping_deleted", targetType: "oidc_mapping", targetId: data.mappingId });
+    await requireSuperAdmin(context.userId);
+    await getDb()`
+      UPDATE oidc_providers SET enabled = ${data.enabled}, updated_at = now()
+      WHERE id = ${data.id}
+    `;
+    await audit({
+      userId: context.userId,
+      actorEmail: context.email,
+      action: "admin.oidc_updated",
+      targetType: "oidc_provider",
+      targetId: data.id,
+      targetLabel: data.enabled ? "enabled" : "disabled",
+    });
     return { ok: true };
   });
+
+/** Non authentifié : liste les providers actifs pour afficher les boutons SSO sur /auth. */
+export const listEnabledOidcProviders = createServerFn({ method: "GET" }).handler(async () => {
+  const rows = await getDb<{ id: string; display_name: string }[]>`
+    SELECT id, display_name FROM oidc_providers WHERE enabled = true ORDER BY created_at ASC
+  `;
+  return rows.map((r) => ({ id: r.id, displayName: r.display_name }));
+});
