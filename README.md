@@ -77,7 +77,7 @@ cd <repository-name>
 2. **Créer le fichier d'environnement**
 
 ```bash
-cp .env.docker.example .env
+cp .env .env.local
 ```
 
 3. **Générer la clé maître de chiffrement** (obligatoire)

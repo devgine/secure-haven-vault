@@ -17,39 +17,49 @@ name: sentinel-vault
 
 services:
   app:
+    container_name: ${PROJECT_NAME}_app
     build:
       context: .
     image: sentinel-vault:latest
     restart: unless-stopped
-    ports:
-      - "${APP_PORT:-3000}:3000"
     environment:
       # Connexion PostgreSQL directe. Par défaut : le service `db` du compose.
       # Renseignez DATABASE_URL dans .env pour viser un PostgreSQL externe.
       DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-vault}:${POSTGRES_PASSWORD:?renseignez POSTGRES_PASSWORD dans .env}@db:5432/${POSTGRES_DB:-vault}}
       # Clé maître de chiffrement AES-256-GCM : openssl rand -hex 32
-      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?générez une clé : openssl rand -hex 32}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY}
       PORT: "3000"
       HOST: "0.0.0.0"
     depends_on:
       db:
         condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK}
+      - traefik.http.routers.${PROJECT_NAME}-app.rule=Host(`${APP_DOMAIN}`)
+      - traefik.http.routers.${PROJECT_NAME}-app.entrypoints=websecure
+      - traefik.http.routers.${PROJECT_NAME}-app.tls=true
+      - traefik.http.services.${PROJECT_NAME}-app.loadbalancer.server.port=3000
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/public/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
+    networks:
+      - internal
+      - traefik-network
 
   db:
-    image: postgres:17-alpine
+    container_name: ${PROJECT_NAME}_db
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-vault}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?renseignez POSTGRES_PASSWORD dans .env}
       POSTGRES_DB: ${POSTGRES_DB:-vault}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
       # Schéma appliqué automatiquement au premier démarrage (base vierge)
       - ./db/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
     healthcheck:
@@ -58,9 +68,15 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    # Décommentez pour administrer la base depuis l'hôte (psql, outils) :
-    # ports:
-    #   - "5432:5432"
+    networks:
+      - internal
 
 volumes:
   pgdata:
+
+networks:
+  internal:
+    driver: bridge
+  traefik-network:
+    external: true
+    name: ${TRAEFIK_NETWORK}
