@@ -591,7 +591,3 @@ export const getSecretVersions = createServerFn({ method: "GET" })
     }));
     return out;
   });
-
-// Ré-exporté pour compatibilité : utilisé par certaines pages pour résoudre
-// le rôle courant dans un coffre.
-export { getWorkspaceRole };
