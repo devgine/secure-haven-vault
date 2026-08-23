@@ -24,8 +24,9 @@ services:
     ports:
       - "${APP_PORT:-3000}:3000"
     environment:
-      # Connexion PostgreSQL directe (réseau interne du compose)
-      DATABASE_URL: postgres://${POSTGRES_USER:-vault}:${POSTGRES_PASSWORD:?renseignez POSTGRES_PASSWORD dans .env}@db:5432/${POSTGRES_DB:-vault}
+      # Connexion PostgreSQL directe. Par défaut : le service `db` du compose.
+      # Renseignez DATABASE_URL dans .env pour viser un PostgreSQL externe.
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-vault}:${POSTGRES_PASSWORD:?renseignez POSTGRES_PASSWORD dans .env}@db:5432/${POSTGRES_DB:-vault}}
       # Clé maître de chiffrement AES-256-GCM : openssl rand -hex 32
       MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?générez une clé : openssl rand -hex 32}
       PORT: "3000"
