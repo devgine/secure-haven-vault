@@ -75,7 +75,8 @@ function mapSecret(row: SecretRow): SecretListItem {
   };
 }
 
-const SECRET_COLS = `id, workspace_id, type, name, username, url, description, tags, favorite, expires_at, notify_before_days, updated_at`;
+// Colonnes listées explicitement (postgres.js ne permet pas d'injecter du SQL
+// dynamique sûr pour une liste de colonnes).
 
 export const getSessionInfo = createServerFn({ method: "GET" })
   .middleware([requireAuth])
