@@ -18,6 +18,7 @@ export type FieldType =
   | "url"
   | "username"
   | "date"
+  | "totp"
   | "textarea";
 
 export interface WorkspaceDto {
@@ -202,5 +203,6 @@ export const FIELD_TYPE_LABELS: Record<FieldType, string> = {
   url: "URL",
   username: "Nom d'utilisateur",
   date: "Date",
+  totp: "TOTP",
   textarea: "Texte long",
 };

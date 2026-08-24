@@ -249,3 +249,10 @@ Nécessite une base PostgreSQL accessible et la variable `DATABASE_URL` configur
 ---
 
 *Built with [Lovable](https://lovable.dev).*
+
+## Import KeePass
+
+Sentinel Vault importe des bases KeePass `.kdbx` (KDBX 3 et 4). Le fichier, le
+mot de passe maître et le fichier clé sont déchiffrés uniquement dans le
+navigateur et ne sont jamais envoyés au serveur ; les entrées sélectionnées sont
+rechiffrées (AES-256-GCM) avant stockage. Voir [docs/KEEPASS-IMPORT.md](docs/KEEPASS-IMPORT.md).

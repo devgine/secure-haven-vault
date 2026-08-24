@@ -9,9 +9,11 @@ import {
   Search,
   Trash2,
   UserPlus,
+  FileKey2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
+import { KeepassImportDialog } from "@/components/vault/keepass-import-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -149,6 +151,8 @@ function WorkspacePage() {
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<SecretDetail | null>(null);
   const [addMemberOpen, setAddMemberOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const updateFn = useServerFn(updateWorkspace);
@@ -253,10 +257,21 @@ function WorkspacePage() {
           <p className="text-sm text-muted-foreground">{workspace?.description}</p>
         </div>
         {canCreate && (
-          <Button onClick={() => { setEditing(null); setFormOpen(true); }}>
-            <Plus className="mr-2 h-4 w-4" /> Nouveau secret
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => setImportOpen(true)}>
+              <FileKey2 className="mr-2 h-4 w-4" /> Importer KeePass
+            </Button>
+            <Button onClick={() => { setEditing(null); setFormOpen(true); }}>
+              <Plus className="mr-2 h-4 w-4" /> Nouveau secret
+            </Button>
+          </div>
         )}
+        <KeepassImportDialog
+          open={importOpen}
+          onOpenChange={setImportOpen}
+          workspaceId={workspaceId}
+          onImported={() => void queryClient.invalidateQueries({ queryKey: ["secrets"] })}
+        />
       </div>
 
       <Tabs defaultValue={tab ?? "secrets"}>

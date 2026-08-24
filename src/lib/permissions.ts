@@ -13,6 +13,8 @@ export type Permission =
   | "member.update"
   | "member.delete"
   | "secret.create"
+  | "secret.import"
+  | "folder.create"
   | "secret.read"
   | "secret.reveal"
   | "secret.copy"
@@ -25,6 +27,8 @@ export type Permission =
 
 const OWNER_PERMS: Permission[] = [
   "workspace.read",
+  "secret.import",
+  "folder.create",
   "workspace.update",
   "workspace.delete",
   "member.read",
@@ -41,6 +45,8 @@ const OWNER_PERMS: Permission[] = [
 
 const ADMIN_PERMS: Permission[] = [
   "workspace.read",
+  "secret.import",
+  "folder.create",
   "workspace.update",
   "member.read",
   "member.invite",
@@ -56,6 +62,8 @@ const ADMIN_PERMS: Permission[] = [
 
 const EDITOR_PERMS: Permission[] = [
   "workspace.read",
+  "secret.import",
+  "folder.create",
   "member.read",
   "secret.create",
   "secret.read",

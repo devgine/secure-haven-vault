@@ -198,3 +198,77 @@ CREATE TABLE IF NOT EXISTS public.platform_settings (
 INSERT INTO public.platform_settings (key, value)
 VALUES ('signup_enabled', 'true'::jsonb)
 ON CONFLICT (key) DO NOTHING;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Import KeePass : dossiers, pièces jointes, jobs d'import
+-- Toutes les instructions sont idempotentes (ré-exécutables).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.secret_folders (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id uuid NOT NULL REFERENCES public.workspaces(id) ON DELETE CASCADE,
+  parent_id uuid REFERENCES public.secret_folders(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  position integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS secret_folders_workspace_idx ON public.secret_folders(workspace_id);
+-- Unicité d'un nom de dossier par parent (racine incluse) : rend la création
+-- de l'arborescence idempotente lors d'une reprise d'import.
+CREATE UNIQUE INDEX IF NOT EXISTS secret_folders_unique_child
+  ON public.secret_folders(workspace_id, parent_id, lower(name)) WHERE parent_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS secret_folders_unique_root
+  ON public.secret_folders(workspace_id, lower(name)) WHERE parent_id IS NULL;
+
+ALTER TABLE public.secrets ADD COLUMN IF NOT EXISTS folder_id uuid REFERENCES public.secret_folders(id) ON DELETE SET NULL;
+ALTER TABLE public.secrets ADD COLUMN IF NOT EXISTS icon text;
+ALTER TABLE public.secrets ADD COLUMN IF NOT EXISTS source_created_at timestamptz;
+ALTER TABLE public.secrets ADD COLUMN IF NOT EXISTS source_modified_at timestamptz;
+
+-- Pièces jointes : contenu TOUJOURS chiffré (AES-256-GCM sous la DEK du coffre).
+CREATE TABLE IF NOT EXISTS public.secret_attachments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  secret_id uuid NOT NULL REFERENCES public.secrets(id) ON DELETE CASCADE,
+  filename text NOT NULL,
+  mime_type text NOT NULL DEFAULT 'application/octet-stream',
+  size_bytes integer NOT NULL DEFAULT 0,
+  ciphertext text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS secret_attachments_secret_idx ON public.secret_attachments(secret_id);
+
+-- Jobs d'import : reprise après erreur, idempotence, anti-double-soumission.
+CREATE TABLE IF NOT EXISTS public.import_jobs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  workspace_id uuid NOT NULL REFERENCES public.workspaces(id) ON DELETE CASCADE,
+  source text NOT NULL DEFAULT 'keepass',
+  root_folder_id uuid REFERENCES public.secret_folders(id) ON DELETE SET NULL,
+  duplicate_strategy text NOT NULL DEFAULT 'skip',
+  status text NOT NULL DEFAULT 'running',
+  planned_entries integer NOT NULL DEFAULT 0,
+  imported_count integer NOT NULL DEFAULT 0,
+  skipped_count integer NOT NULL DEFAULT 0,
+  replaced_count integer NOT NULL DEFAULT 0,
+  merged_count integer NOT NULL DEFAULT 0,
+  failed_count integer NOT NULL DEFAULT 0,
+  attachment_count integer NOT NULL DEFAULT 0,
+  folder_count integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+DROP TRIGGER IF EXISTS import_jobs_updated ON public.import_jobs;
+CREATE TRIGGER import_jobs_updated BEFORE UPDATE ON public.import_jobs FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- client_key : identifiant déterministe calculé dans le navigateur ; garantit
+-- qu'une entrée rejouée après interruption ne crée jamais de doublon.
+CREATE TABLE IF NOT EXISTS public.import_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_id uuid NOT NULL REFERENCES public.import_jobs(id) ON DELETE CASCADE,
+  client_key text NOT NULL,
+  secret_id uuid REFERENCES public.secrets(id) ON DELETE SET NULL,
+  status text NOT NULL DEFAULT 'imported',
+  message text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (job_id, client_key)
+);
