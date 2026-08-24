@@ -16,7 +16,7 @@ import type {
 
 const fieldInput = z.object({
   label: z.string().min(1).max(100),
-  fieldType: z.enum(["text", "secret", "password", "url", "username", "date", "textarea"]),
+  fieldType: z.enum(["text", "secret", "password", "url", "username", "date", "totp", "textarea"]),
   isSensitive: z.boolean(),
   value: z.string().max(65536),
 });

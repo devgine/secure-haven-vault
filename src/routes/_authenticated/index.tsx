@@ -1,10 +1,12 @@
+import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { CalendarClock, KeyRound, Plus, ShieldCheck, Star, Vault } from "lucide-react";
+import { CalendarClock, FileKey2, KeyRound, Plus, ShieldCheck, Star, Vault } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SecretRow } from "@/components/vault/secret-row";
+import { KeepassImportDialog } from "@/components/vault/keepass-import-dialog";
 import { listWorkspaces, searchSecrets } from "@/lib/vault.functions";
 
 export const Route = createFileRoute("/_authenticated/")({
@@ -21,6 +23,7 @@ export const Route = createFileRoute("/_authenticated/")({
 });
 
 function DashboardPage() {
+  const [importOpen, setImportOpen] = useState(false);
   const { data: workspaces } = useQuery({
     queryKey: ["workspaces"],
     queryFn: () => listWorkspaces(),
@@ -143,8 +146,13 @@ function DashboardPage() {
         </Card>
       </div>
 
+      <KeepassImportDialog open={importOpen} onOpenChange={setImportOpen} />
+
       {(workspaces ?? []).length > 0 && (
-        <div className="flex justify-center">
+        <div className="flex justify-center gap-2">
+          <Button variant="outline" onClick={() => setImportOpen(true)}>
+            <FileKey2 className="mr-2 h-4 w-4" /> Importer un coffre KeePass
+          </Button>
           <Button variant="outline" asChild>
             <Link to="/workspaces/$workspaceId" params={{ workspaceId: workspaces![0]!.id }} search={{}}>
               <Plus className="mr-2 h-4 w-4" /> Ajouter un secret
