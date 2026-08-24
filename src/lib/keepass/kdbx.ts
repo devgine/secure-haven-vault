@@ -163,7 +163,9 @@ export async function openKeepassDatabase(opts: OpenOptions): Promise<KeepassPar
 
   const credentials = new kdbxweb.Credentials(
     opts.password ? kdbxweb.ProtectedValue.fromString(opts.password) : null,
-    opts.keyFile ?? null,
+    // kdbxweb efface le tampon du fichier clé après usage : on lui passe une
+    // copie pour qu'une nouvelle tentative reste possible.
+    opts.keyFile ? opts.keyFile.slice(0) : null,
   );
   await credentials.ready;
 

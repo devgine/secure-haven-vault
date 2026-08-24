@@ -34,7 +34,7 @@ interface BuildOptions {
 async function buildDatabase(opts: BuildOptions = {}): Promise<ArrayBuffer> {
   const credentials = new kdbxweb.Credentials(
     opts.password === null ? null : kdbxweb.ProtectedValue.fromString(opts.password ?? "correct horse"),
-    opts.keyFile ?? null,
+    opts.keyFile ? opts.keyFile.slice(0) : null,
   );
   await credentials.ready;
   const db = kdbxweb.Kdbx.create(credentials, "Test");
