@@ -81,6 +81,13 @@ export function SecretDetailDialog({
   const favoriteFn = useServerFn(toggleFavorite);
   const deleteFn = useServerFn(deleteSecret);
 
+  const { data: folderData } = useQuery({
+    queryKey: ["folders", workspaceId],
+    queryFn: () => listFolders({ data: { workspaceId } }),
+    enabled: Boolean(secretId),
+  });
+  const detailFolders = folderData ?? [];
+
   const [revealed, setRevealed] = useState<Map<string, string>>(new Map());
   const [busyField, setBusyField] = useState<string | null>(null);
 
