@@ -23,6 +23,7 @@ const fieldInput = z.object({
 
 const secretInput = z.object({
   workspaceId: z.string().uuid(),
+  folderId: z.string().uuid().nullable().optional(),
   type: z.enum(["LOGIN", "API_KEY", "TOKEN", "SSH_KEY", "DATABASE", "SECURE_NOTE", "CUSTOM"]),
   name: z.string().min(1).max(200),
   username: z.string().max(500).optional(),
@@ -37,6 +38,7 @@ const secretInput = z.object({
 interface SecretRow {
   id: string;
   workspace_id: string;
+  folder_id?: string | null;
   type: SecretListItem["type"];
   name: string;
   username: string | null;
@@ -57,6 +59,7 @@ function mapSecret(row: SecretRow): SecretListItem {
   return {
     id: row.id,
     workspaceId: row.workspace_id,
+    folderId: row.folder_id ?? null,
     workspaceName: row.workspace_name ?? undefined,
     type: row.type,
     name: row.name,
@@ -223,14 +226,14 @@ export const listSecrets = createServerFn({ method: "GET" })
     const sql = getDb();
     const rows = data.trashed
       ? await sql<SecretRow[]>`
-          SELECT id, workspace_id, type, name, username, url, description, tags,
+          SELECT id, workspace_id, folder_id, type, name, username, url, description, tags,
                  favorite, expires_at, notify_before_days, updated_at
           FROM secrets
           WHERE workspace_id = ${data.workspaceId} AND deleted_at IS NOT NULL
           ORDER BY updated_at DESC
         `
       : await sql<SecretRow[]>`
-          SELECT id, workspace_id, type, name, username, url, description, tags,
+          SELECT id, workspace_id, folder_id, type, name, username, url, description, tags,
                  favorite, expires_at, notify_before_days, updated_at
           FROM secrets
           WHERE workspace_id = ${data.workspaceId} AND deleted_at IS NULL
@@ -258,7 +261,7 @@ export const searchSecrets = createServerFn({ method: "GET" })
     // Périmètre : uniquement les coffres actifs dont l'utilisateur est membre.
     const rows = q
       ? await sql<SecretRow[]>`
-          SELECT s.id, s.workspace_id, s.type, s.name, s.username, s.url, s.description,
+          SELECT s.id, s.workspace_id, s.folder_id, s.type, s.name, s.username, s.url, s.description,
                  s.tags, s.favorite, s.expires_at, s.notify_before_days, s.updated_at,
                  w.name AS workspace_name
           FROM secrets s
@@ -278,7 +281,7 @@ export const searchSecrets = createServerFn({ method: "GET" })
           LIMIT ${limit}
         `
       : await sql<SecretRow[]>`
-          SELECT s.id, s.workspace_id, s.type, s.name, s.username, s.url, s.description,
+          SELECT s.id, s.workspace_id, s.folder_id, s.type, s.name, s.username, s.url, s.description,
                  s.tags, s.favorite, s.expires_at, s.notify_before_days, s.updated_at,
                  w.name AS workspace_name
           FROM secrets s
@@ -300,7 +303,7 @@ export const getSecret = createServerFn({ method: "GET" })
     const { userId } = context;
     const sql = getDb();
     const rows = await sql<SecretRow[]>`
-      SELECT id, workspace_id, type, name, username, url, description, tags,
+      SELECT id, workspace_id, folder_id, type, name, username, url, description, tags,
              favorite, expires_at, notify_before_days, updated_at,
              created_at, created_by, updated_by
       FROM secrets
@@ -408,9 +411,9 @@ export const createSecret = createServerFn({ method: "POST" })
     const sql = getDb();
 
     const inserted = await sql<{ id: string }[]>`
-      INSERT INTO secrets (workspace_id, type, name, username, url, description, tags, expires_at, notify_before_days, created_by, updated_by)
+      INSERT INTO secrets (workspace_id, folder_id, type, name, username, url, description, tags, expires_at, notify_before_days, created_by, updated_by)
       VALUES (
-        ${data.workspaceId}, ${data.type}, ${data.name},
+        ${data.workspaceId}, ${data.folderId ?? null}, ${data.type}, ${data.name},
         ${data.username || null}, ${data.url || null}, ${data.description || null},
         ${sql.array(data.tags ?? [])},
         ${data.expiresAt || null}, ${data.notifyBeforeDays ?? null},
@@ -455,6 +458,7 @@ export const updateSecret = createServerFn({ method: "POST" })
 
     await sql`
       UPDATE secrets SET
+        folder_id = ${data.folderId ?? null},
         type = ${data.type},
         name = ${data.name},
         username = ${data.username || null},

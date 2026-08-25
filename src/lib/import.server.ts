@@ -21,20 +21,30 @@ type Tx = postgres.Sql | postgres.TransactionSql;
 export async function ensureFolderPath(
   tx: Tx,
   workspaceId: string,
-  rootFolderId: string,
+  rootFolderId: string | null,
   path: string[],
-): Promise<{ folderId: string; created: number }> {
-  let parent = rootFolderId;
+): Promise<{ folderId: string | null; created: number }> {
+  let parent: string | null = rootFolderId;
   let created = 0;
   for (const rawName of path) {
     const name = rawName.trim().slice(0, 120) || "Groupe";
-    const existing = await tx<{ id: string }[]>`
-      SELECT id FROM secret_folders
-      WHERE workspace_id = ${workspaceId} AND parent_id = ${parent} AND lower(name) = lower(${name})
-      LIMIT 1
-    `;
-    if (existing[0]) {
-      parent = existing[0].id;
+    // Réutilise un groupe natif existant portant le même nom au même niveau :
+    // l'arborescence KeePass fusionne proprement avec celle du coffre.
+    const found = parent
+      ? await tx<{ id: string }[]>`
+          SELECT id FROM secret_folders
+          WHERE workspace_id = ${workspaceId} AND parent_id = ${parent}
+            AND lower(name) = lower(${name}) AND deleted_at IS NULL
+          LIMIT 1
+        `
+      : await tx<{ id: string }[]>`
+          SELECT id FROM secret_folders
+          WHERE workspace_id = ${workspaceId} AND parent_id IS NULL
+            AND lower(name) = lower(${name}) AND deleted_at IS NULL
+          LIMIT 1
+        `;
+    if (found[0]) {
+      parent = found[0].id;
       continue;
     }
     const inserted = await tx<{ id: string }[]>`
@@ -47,11 +57,19 @@ export async function ensureFolderPath(
       parent = inserted[0].id;
       created += 1;
     } else {
-      const retry = await tx<{ id: string }[]>`
-        SELECT id FROM secret_folders
-        WHERE workspace_id = ${workspaceId} AND parent_id = ${parent} AND lower(name) = lower(${name})
-        LIMIT 1
-      `;
+      const retry = parent
+        ? await tx<{ id: string }[]>`
+            SELECT id FROM secret_folders
+            WHERE workspace_id = ${workspaceId} AND parent_id = ${parent}
+              AND lower(name) = lower(${name}) AND deleted_at IS NULL
+            LIMIT 1
+          `
+        : await tx<{ id: string }[]>`
+            SELECT id FROM secret_folders
+            WHERE workspace_id = ${workspaceId} AND parent_id IS NULL
+              AND lower(name) = lower(${name}) AND deleted_at IS NULL
+            LIMIT 1
+          `;
       parent = retry[0]!.id;
     }
   }
@@ -91,7 +109,7 @@ export async function ensureRootFolder(
 export async function findDuplicate(
   tx: Tx,
   workspaceId: string,
-  folderId: string,
+  folderId: string | null,
   item: ImportItemPayload,
   criteria: DuplicateCriterion[],
 ): Promise<string | null> {
@@ -222,7 +240,7 @@ export async function runImportBatch(params: BatchParams): Promise<BatchResult> 
         const { folderId, created } = await ensureFolderPath(
           tx,
           job.workspace_id,
-          job.root_folder_id!,
+          job.root_folder_id,
           item.path,
         );
         result.folders += created;

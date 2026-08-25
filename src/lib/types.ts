@@ -35,9 +35,29 @@ export interface WorkspaceDto {
   createdAt: string;
 }
 
+export interface FolderDto {
+  id: string;
+  workspaceId: string;
+  parentId: string | null;
+  name: string;
+  description: string | null;
+  icon: string | null;
+  color: string | null;
+  position: number;
+  secretCount: number;
+  createdAt: string;
+}
+
+export interface FolderNode extends FolderDto {
+  children: FolderNode[];
+  depth: number;
+  totalCount: number;
+}
+
 export interface SecretListItem {
   id: string;
   workspaceId: string;
+  folderId: string | null;
   workspaceName?: string | undefined;
   type: SecretType;
   name: string;
@@ -83,6 +103,7 @@ export interface SecretFieldInput {
 
 export interface SecretInput {
   workspaceId: string;
+  folderId?: string | null;
   type: SecretType;
   name: string;
   username?: string;

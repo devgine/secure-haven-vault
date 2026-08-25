@@ -32,6 +32,9 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { FolderPicker } from "@/components/vault/folder-picker";
+import { listFolders } from "@/lib/folders.functions";
+import { folderPathLabel } from "@/lib/folders";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -86,6 +89,8 @@ export function KeepassImportDialog({ open, onOpenChange, workspaceId, onImporte
   const [step, setStep] = useState<Step>("destination");
   const [target, setTarget] = useState<string>(workspaceId ?? "");
   const [rootFolderName, setRootFolderName] = useState(defaultRootFolderName());
+  const [rootMode, setRootMode] = useState<"new" | "existing" | "root">("new");
+  const [rootFolderId, setRootFolderId] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [fileBuffer, setFileBuffer] = useState<ArrayBuffer | null>(null);
   const [formatLabel, setFormatLabel] = useState<string>("");
@@ -111,6 +116,14 @@ export function KeepassImportDialog({ open, onOpenChange, workspaceId, onImporte
     queryFn: () => listImportTargets(),
     enabled: open,
   });
+
+  // Groupes du coffre de destination (pour importer sous un groupe existant).
+  const { data: folderData } = useQuery({
+    queryKey: ["folders", target],
+    queryFn: () => listFolders({ data: { workspaceId: target } }),
+    enabled: open && Boolean(target),
+  });
+  const importFolders = folderData ?? [];
 
   useEffect(() => {
     if (workspaceId) setTarget(workspaceId);
@@ -247,7 +260,9 @@ export function KeepassImportDialog({ open, onOpenChange, workspaceId, onImporte
       const job = await startImportJob({
         data: {
           workspaceId: target,
-          rootFolderName,
+          rootMode,
+          rootFolderName: rootMode === "new" ? rootFolderName : undefined,
+          rootFolderId: rootMode === "existing" ? rootFolderId : null,
           strategy,
           criteria,
           plannedEntries: selectedEntries.length,
@@ -299,7 +314,12 @@ export function KeepassImportDialog({ open, onOpenChange, workspaceId, onImporte
     const body = {
       generatedAt: new Date().toISOString(),
       destination: targets?.find((t) => t.id === target)?.name ?? "",
-      rootFolder: rootFolderName,
+      rootFolder:
+        rootMode === "new"
+          ? rootFolderName
+          : rootMode === "existing"
+            ? folderPathLabel(importFolders, rootFolderId)
+            : "Racine du coffre",
       duplicateStrategy: strategy,
       counters: {
         imported: report.imported,
@@ -356,15 +376,49 @@ export function KeepassImportDialog({ open, onOpenChange, workspaceId, onImporte
               </p>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="root-folder">Dossier racine de l'import</Label>
-              <Input
-                id="root-folder"
-                value={rootFolderName}
-                onChange={(e) => setRootFolderName(e.target.value)}
-              />
+              <Label>Emplacement de l'import</Label>
+              <Select value={rootMode} onValueChange={(v) => setRootMode(v as typeof rootMode)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="new">Créer un nouveau groupe racine</SelectItem>
+                  <SelectItem value="existing">Importer dans un groupe existant</SelectItem>
+                  <SelectItem value="root">Recréer l'arborescence à la racine du coffre</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                La hiérarchie des groupes KeePass est recréée à l'identique sous cet emplacement.
+              </p>
             </div>
+            {rootMode === "new" && (
+              <div className="space-y-2">
+                <Label htmlFor="root-folder">Nom du groupe racine</Label>
+                <Input
+                  id="root-folder"
+                  value={rootFolderName}
+                  onChange={(e) => setRootFolderName(e.target.value)}
+                />
+              </div>
+            )}
+            {rootMode === "existing" && (
+              <div className="space-y-2">
+                <Label>Groupe de destination</Label>
+                <FolderPicker
+                  folders={importFolders}
+                  value={rootFolderId}
+                  onChange={setRootFolderId}
+                  rootLabel="— choisir un groupe —"
+                />
+              </div>
+            )}
             <div className="flex justify-end">
-              <Button disabled={!target || !rootFolderName} onClick={() => setStep("file")}>
+              <Button
+                disabled={
+                  !target ||
+                  (rootMode === "new" && !rootFolderName) ||
+                  (rootMode === "existing" && !rootFolderId)
+                }
+                onClick={() => setStep("file")}
+              >
                 Continuer <ChevronRight className="h-4 w-4" />
               </Button>
             </div>
@@ -629,8 +683,14 @@ export function KeepassImportDialog({ open, onOpenChange, workspaceId, onImporte
               <dl className="grid grid-cols-2 gap-2">
                 <dt className="text-muted-foreground">Coffre de destination</dt>
                 <dd>{targets?.find((t) => t.id === target)?.name}</dd>
-                <dt className="text-muted-foreground">Dossier racine</dt>
-                <dd>{rootFolderName}</dd>
+                <dt className="text-muted-foreground">Emplacement</dt>
+                <dd>
+                  {rootMode === "new"
+                    ? rootFolderName
+                    : rootMode === "existing"
+                      ? folderPathLabel(importFolders, rootFolderId)
+                      : "Racine du coffre"}
+                </dd>
                 <dt className="text-muted-foreground">Groupes</dt>
                 <dd>{parsed.stats.groups}</dd>
                 <dt className="text-muted-foreground">Entrées à importer</dt>

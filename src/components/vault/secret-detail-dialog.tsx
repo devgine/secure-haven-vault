@@ -13,6 +13,9 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
+import { Folder } from "lucide-react";
+import { listFolders } from "@/lib/folders.functions";
+import { folderPathLabel } from "@/lib/folders";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -76,6 +79,13 @@ export function SecretDetailDialog({
   const revealFn = useServerFn(revealSecret);
   const favoriteFn = useServerFn(toggleFavorite);
   const deleteFn = useServerFn(deleteSecret);
+
+  const { data: folderData } = useQuery({
+    queryKey: ["folders", workspaceId],
+    queryFn: () => listFolders({ data: { workspaceId } }),
+    enabled: Boolean(secretId),
+  });
+  const detailFolders = folderData ?? [];
 
   const [revealed, setRevealed] = useState<Map<string, string>>(new Map());
   const [busyField, setBusyField] = useState<string | null>(null);
@@ -172,6 +182,10 @@ export function SecretDetailDialog({
                   <DialogDescription className="mt-1">
                     {secret.description || "Aucune description"}
                   </DialogDescription>
+                  <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Folder className="h-3.5 w-3.5" />
+                    {folderPathLabel(detailFolders, secret.folderId)}
+                  </p>
                 </div>
                 <Button variant="ghost" size="icon" onClick={() => void onToggleFavorite()} title="Favori">
                   <Star className={cn("h-4 w-4", secret.favorite && "fill-warning text-warning")} />

@@ -34,6 +34,7 @@ Sentinel Vault centralise la gestion de vos secrets sensibles dans une interface
 - **Chiffrement de bout en bout au repos** : chaque secret est chiffré côté serveur avec AES-256-GCM via une clé de données unique par workspace (DEK), elle-même protégée par une clé maître.
 - **Masquage des secrets** : les valeurs sensibles restent masquées par défaut ; révélation et copie temporaire sur action explicite de l'utilisateur.
 - **Générateur de secrets** : générateur de mots de passe, Base64, HEX, UUID et API token, tous utilisant un générateur cryptographique sécurisé (CSPRNG).
+- **Groupes (arborescence)** : chaque coffre possède ses propres groupes imbriqués, avec fil d'Ariane, glisser vers un autre groupe, renommage, réordonnancement, déplacement en masse de secrets, et suppression récursive (les secrets partent en corbeille, jamais détruits). La hiérarchie d'une base KeePass importée est conservée à l'identique.
 - **Recherche et organisation** : recherche par nom, username, URL, description, tags et type ; favoris et tags.
 - **RBAC** : rôles par workspace (OWNER, ADMIN, EDITOR, VIEWER) avec permissions fines (création, lecture, révélation, copie, modification, suppression).
 - **Audit logs** : journalisation complète des actions sensibles (login/logout, création, modification, suppression, révélation, copie, etc.) sans jamais stocker les secrets en clair.

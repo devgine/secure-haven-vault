@@ -37,6 +37,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SecretDetailDialog } from "@/components/vault/secret-detail-dialog";
 import { SecretFormDialog } from "@/components/vault/secret-form-dialog";
 import { SecretRow } from "@/components/vault/secret-row";
+import { FolderTree, type FolderSelection } from "@/components/vault/folder-tree";
+import { FolderPicker } from "@/components/vault/folder-picker";
+import { listFolders, moveSecrets } from "@/lib/folders.functions";
+import { folderAncestry, subtreeIds } from "@/lib/folders";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   addMember,
   listMembers,
@@ -152,6 +157,11 @@ function WorkspacePage() {
   const [editing, setEditing] = useState<SecretDetail | null>(null);
   const [addMemberOpen, setAddMemberOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [selection, setSelection] = useState<FolderSelection>({ kind: "all" });
+  const [includeSub, setIncludeSub] = useState(true);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveTargetFolder, setMoveTargetFolder] = useState<string | null>(null);
 
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -160,6 +170,7 @@ function WorkspacePage() {
   const deleteSecretFn = useServerFn(deleteSecret);
   const removeMemberFn = useServerFn(removeMember);
   const updateRoleFn = useServerFn(updateMemberRole);
+  const moveSecretsFn = useServerFn(moveSecrets);
 
   const { data: workspaces } = useQuery({ queryKey: ["workspaces"], queryFn: () => listWorkspaces() });
   const workspace = useMemo(
@@ -181,22 +192,67 @@ function WorkspacePage() {
     queryFn: () => listSecrets({ data: { workspaceId, trashed: true } }),
     enabled: canDeleteWorkspace || canCreate,
   });
+  const { data: folders } = useQuery({
+    queryKey: ["folders", workspaceId],
+    queryFn: () => listFolders({ data: { workspaceId } }),
+  });
   const { data: members } = useQuery({
     queryKey: ["members", workspaceId],
     queryFn: () => listMembers({ data: { workspaceId } }),
   });
 
+  const folderList = folders ?? [];
+
+  // Périmètre courant : tout le coffre, les secrets sans groupe, ou un groupe
+  // (avec ou sans ses sous-groupes).
+  const scoped = useMemo(() => {
+    const list = secrets ?? [];
+    if (selection.kind === "all") return list;
+    if (selection.kind === "unfiled") return list.filter((s) => !s.folderId);
+    const ids = includeSub
+      ? subtreeIds(folderList, selection.id)
+      : new Set([selection.id]);
+    return list.filter((s) => s.folderId && ids.has(s.folderId));
+  }, [secrets, selection, includeSub, folderList]);
+
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    if (!q) return secrets ?? [];
-    return (secrets ?? []).filter(
+    if (!q) return scoped;
+    return scoped.filter(
       (s) =>
         s.name.toLowerCase().includes(q) ||
         (s.username ?? "").toLowerCase().includes(q) ||
         (s.url ?? "").toLowerCase().includes(q) ||
         s.tags.some((t) => t.toLowerCase().includes(q)),
     );
-  }, [secrets, filter]);
+  }, [scoped, filter]);
+
+  const breadcrumb =
+    selection.kind === "folder" ? folderAncestry(folderList, selection.id) : [];
+  const unfiledCount = (secrets ?? []).filter((s) => !s.folderId).length;
+
+  const toggleChecked = (id: string) =>
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const submitMoveSecrets = async () => {
+    try {
+      const res = await moveSecretsFn({
+        data: { workspaceId, secretIds: [...checked], folderId: moveTargetFolder },
+      });
+      toast.success(`${res.moved} secret(s) déplacé(s)`);
+      setChecked(new Set());
+      setMoveOpen(false);
+      await queryClient.invalidateQueries({ queryKey: ["secrets"] });
+      await queryClient.invalidateQueries({ queryKey: ["folders", workspaceId] });
+    } catch (err) {
+      toast.error((err as Error).message);
+    }
+  };
 
   const openSecret = (id: string | undefined) =>
     navigate({
@@ -284,40 +340,123 @@ function WorkspacePage() {
           {canUpdateWorkspace && <TabsTrigger value="settings">Paramètres</TabsTrigger>}
         </TabsList>
 
-        <TabsContent value="secrets" className="space-y-4 pt-4">
-          <div className="relative max-w-sm">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="Filtrer dans ce coffre…"
-              className="pl-9"
-            />
-          </div>
-          {isLoading ? (
-            <p className="py-10 text-center text-sm text-muted-foreground">Chargement…</p>
-          ) : filtered.length === 0 ? (
-            <div className="rounded-xl border border-dashed py-14 text-center">
-              <KeyRound className="mx-auto h-8 w-8 text-muted-foreground/50" />
-              <p className="mt-3 text-sm text-muted-foreground">
-                {filter ? "Aucun secret ne correspond au filtre." : "Ce coffre est vide."}
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {filtered.map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => openSecret(s.id)}
-                  className="block w-full text-left"
-                >
-                  <div className="pointer-events-none">
-                    <SecretRow secret={s} />
-                  </div>
+        <TabsContent value="secrets" className="pt-4">
+          <div className="grid gap-6 md:grid-cols-[240px_1fr]">
+            <aside className="md:sticky md:top-4 md:self-start">
+              <FolderTree
+                workspaceId={workspaceId}
+                folders={folderList}
+                selection={selection}
+                onSelect={(next) => {
+                  setSelection(next);
+                  setChecked(new Set());
+                }}
+                canManage={canCreate}
+                totalCount={secrets?.length ?? 0}
+                unfiledCount={unfiledCount}
+              />
+            </aside>
+
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+                <button type="button" className="hover:text-foreground" onClick={() => setSelection({ kind: "all" })}>
+                  {workspace?.name ?? "Coffre"}
                 </button>
-              ))}
+                {selection.kind === "unfiled" && <><span>/</span><span className="text-foreground">Sans groupe</span></>}
+                {breadcrumb.map((f, i) => (
+                  <span key={f.id} className="flex items-center gap-2">
+                    <span>/</span>
+                    <button
+                      type="button"
+                      className={i === breadcrumb.length - 1 ? "font-medium text-foreground" : "hover:text-foreground"}
+                      onClick={() => setSelection({ kind: "folder", id: f.id })}
+                    >
+                      {f.name}
+                    </button>
+                  </span>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="relative min-w-[220px] flex-1">
+                  <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={filter}
+                    onChange={(e) => setFilter(e.target.value)}
+                    placeholder="Filtrer dans ce périmètre…"
+                    className="pl-9"
+                  />
+                </div>
+                {selection.kind === "folder" && (
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Switch checked={includeSub} onCheckedChange={setIncludeSub} />
+                    Inclure les sous-groupes
+                  </label>
+                )}
+                {canCreate && checked.size > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setMoveTargetFolder(selection.kind === "folder" ? selection.id : null);
+                      setMoveOpen(true);
+                    }}
+                  >
+                    Déplacer ({checked.size})
+                  </Button>
+                )}
+              </div>
+
+              {isLoading ? (
+                <p className="py-10 text-center text-sm text-muted-foreground">Chargement…</p>
+              ) : filtered.length === 0 ? (
+                <div className="rounded-xl border border-dashed py-14 text-center">
+                  <KeyRound className="mx-auto h-8 w-8 text-muted-foreground/50" />
+                  <p className="mt-3 text-sm text-muted-foreground">
+                    {filter ? "Aucun secret ne correspond au filtre." : "Aucun secret dans ce périmètre."}
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {filtered.map((s) => (
+                    <div key={s.id} className="flex items-center gap-2">
+                      {canCreate && (
+                        <Checkbox
+                          checked={checked.has(s.id)}
+                          onCheckedChange={() => toggleChecked(s.id)}
+                          aria-label={`Sélectionner ${s.name}`}
+                        />
+                      )}
+                      <button onClick={() => openSecret(s.id)} className="block min-w-0 flex-1 text-left">
+                        <div className="pointer-events-none">
+                          <SecretRow secret={s} />
+                        </div>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
+          </div>
+
+          <Dialog open={moveOpen} onOpenChange={setMoveOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Déplacer {checked.size} secret(s)</DialogTitle>
+                <DialogDescription>
+                  Choisissez le groupe de destination dans ce coffre.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-2">
+                <Label>Destination</Label>
+                <FolderPicker folders={folderList} value={moveTargetFolder} onChange={setMoveTargetFolder} />
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setMoveOpen(false)}>Annuler</Button>
+                <Button onClick={() => void submitMoveSecrets()}>Déplacer</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </TabsContent>
 
         {!workspace?.isPersonal && (
@@ -487,6 +626,7 @@ function WorkspacePage() {
         onOpenChange={(o) => { setFormOpen(o); if (!o) setEditing(null); }}
         workspaceId={workspaceId}
         existing={editing}
+        defaultFolderId={selection.kind === "folder" ? selection.id : null}
       />
       <AddMemberDialog open={addMemberOpen} onOpenChange={setAddMemberOpen} workspaceId={workspaceId} />
 

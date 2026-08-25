@@ -24,6 +24,9 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { createSecret, revealSecret, updateSecret } from "@/lib/vault.functions";
+import { listFolders } from "@/lib/folders.functions";
+import { useQuery } from "@tanstack/react-query";
+import { FolderPicker } from "@/components/vault/folder-picker";
 import {
   FIELD_TYPE_LABELS,
   SECRET_TEMPLATES,
@@ -46,17 +49,26 @@ export function SecretFormDialog({
   onOpenChange,
   workspaceId,
   existing,
+  defaultFolderId = null,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   workspaceId: string;
   existing?: SecretDetail | null;
+  defaultFolderId?: string | null;
 }) {
   const queryClient = useQueryClient();
   const createFn = useServerFn(createSecret);
   const updateFn = useServerFn(updateSecret);
   const revealFn = useServerFn(revealSecret);
 
+  const { data: folders } = useQuery({
+    queryKey: ["folders", workspaceId],
+    queryFn: () => listFolders({ data: { workspaceId } }),
+    enabled: open,
+  });
+
+  const [folderId, setFolderId] = useState<string | null>(null);
   const [type, setType] = useState<SecretType>("LOGIN");
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
@@ -73,6 +85,7 @@ export function SecretFormDialog({
 
   useEffect(() => {
     if (!open) return;
+    setFolderId(existing ? existing.folderId : defaultFolderId);
     setType(existing?.type ?? "LOGIN");
     setName(existing?.name ?? "");
     setUsername(existing?.username ?? "");
@@ -151,6 +164,7 @@ export function SecretFormDialog({
     setSaving(true);
     try {
       const payload = {
+        folderId,
         type,
         name: name.trim(),
         username: username || undefined,
@@ -204,6 +218,10 @@ export function SecretFormDialog({
                 ))}
               </SelectContent>
             </Select>
+          </div>
+          <div className="space-y-2">
+            <Label>Groupe</Label>
+            <FolderPicker folders={folders ?? []} value={folderId} onChange={setFolderId} />
           </div>
           <div className="space-y-2">
             <Label htmlFor="sf-name">Nom *</Label>

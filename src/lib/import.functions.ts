@@ -75,7 +75,11 @@ export const startImportJob = createServerFn({ method: "POST" })
     z
       .object({
         workspaceId: z.string().uuid(),
-        rootFolderName: z.string().min(1).max(120),
+        // "new" : nouveau groupe racine ; "existing" : sous un groupe existant ;
+        // "root" : l'arborescence KeePass est recréée à la racine du coffre.
+        rootMode: z.enum(["new", "existing", "root"]).optional(),
+        rootFolderName: z.string().min(1).max(120).optional(),
+        rootFolderId: z.string().uuid().nullable().optional(),
         strategy,
         criteria: z.array(criterion).min(1).max(4),
         plannedEntries: z.number().int().min(0).max(100000),
@@ -92,7 +96,20 @@ export const startImportJob = createServerFn({ method: "POST" })
     }
 
     const sql = getDb();
-    const { folderId } = await ensureRootFolder(sql, data.workspaceId, data.rootFolderName);
+    const mode = data.rootMode ?? "new";
+    let folderId: string | null = null;
+    if (mode === "new") {
+      const name = data.rootFolderName?.trim() || "Import KeePass";
+      folderId = (await ensureRootFolder(sql, data.workspaceId, name)).folderId;
+    } else if (mode === "existing") {
+      if (!data.rootFolderId) throw new Error("Groupe de destination requis");
+      const rows = await sql<{ id: string }[]>`
+        SELECT id FROM secret_folders
+        WHERE id = ${data.rootFolderId} AND workspace_id = ${data.workspaceId} AND deleted_at IS NULL
+      `;
+      if (!rows[0]) throw new Error("Groupe de destination introuvable");
+      folderId = rows[0].id;
+    }
     const rows = await sql<{ id: string; created_at: Date | string }[]>`
       INSERT INTO import_jobs (user_id, workspace_id, root_folder_id, duplicate_strategy, planned_entries)
       VALUES (${userId}, ${data.workspaceId}, ${folderId}, ${data.strategy}, ${data.plannedEntries})
