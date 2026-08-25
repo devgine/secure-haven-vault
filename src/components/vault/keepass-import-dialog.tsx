@@ -117,6 +117,14 @@ export function KeepassImportDialog({ open, onOpenChange, workspaceId, onImporte
     enabled: open,
   });
 
+  // Groupes du coffre de destination (pour importer sous un groupe existant).
+  const { data: folderData } = useQuery({
+    queryKey: ["folders", target],
+    queryFn: () => listFolders({ data: { workspaceId: target } }),
+    enabled: open && Boolean(target),
+  });
+  const importFolders = folderData ?? [];
+
   useEffect(() => {
     if (workspaceId) setTarget(workspaceId);
   }, [workspaceId]);
