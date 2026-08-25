@@ -125,9 +125,9 @@ async function main() {
   // Suppression récursive : secrets en corbeille, jamais détruits
   const ids = await descendantIds(sql, infra);
   const trashed = await sql<{ id: string }[]>`
-    UPDATE secrets SET deleted_at = now() WHERE folder_id = ANY(${sql.array(ids)}) AND deleted_at IS NULL RETURNING id
+    UPDATE secrets SET deleted_at = now() WHERE folder_id = ANY(${sql.array(ids)}::uuid[]) AND deleted_at IS NULL RETURNING id
   `;
-  await sql`UPDATE secret_folders SET deleted_at = now() WHERE id = ANY(${sql.array(ids)})`;
+  await sql`UPDATE secret_folders SET deleted_at = now() WHERE id = ANY(${sql.array(ids)}::uuid[])`;
   check("secrets envoyés à la corbeille", trashed.length === 3);
   check(
     "aucun secret détruit",

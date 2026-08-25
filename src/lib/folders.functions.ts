@@ -263,10 +263,10 @@ export const deleteFolder = createServerFn({ method: "POST" })
       }
       const trashed = await tx<{ id: string }[]>`
         UPDATE secrets SET deleted_at = now(), updated_by = ${context.userId}
-        WHERE folder_id = ANY(${tx.array(ids)}) AND deleted_at IS NULL
+        WHERE folder_id = ANY(${tx.array(ids)}::uuid[]) AND deleted_at IS NULL
         RETURNING id
       `;
-      await tx`UPDATE secret_folders SET deleted_at = now() WHERE id = ANY(${tx.array(ids)})`;
+      await tx`UPDATE secret_folders SET deleted_at = now() WHERE id = ANY(${tx.array(ids)}::uuid[])`;
       return { secrets: trashed.length, folders: ids.length };
     });
 
@@ -303,7 +303,7 @@ export const moveSecrets = createServerFn({ method: "POST" })
       UPDATE secrets SET folder_id = ${data.folderId}, updated_by = ${context.userId}
       WHERE workspace_id = ${data.workspaceId}
         AND deleted_at IS NULL
-        AND id = ANY(${sql.array(data.secretIds)})
+        AND id = ANY(${sql.array(data.secretIds)}::uuid[])
       RETURNING id
     `;
     await audit({
