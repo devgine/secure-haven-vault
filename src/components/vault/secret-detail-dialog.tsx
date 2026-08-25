@@ -13,7 +13,6 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
-import { useQuery } from "@tanstack/react-query";
 import { Folder } from "lucide-react";
 import { listFolders } from "@/lib/folders.functions";
 import { folderPathLabel } from "@/lib/folders";
