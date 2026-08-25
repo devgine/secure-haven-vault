@@ -272,3 +272,21 @@ CREATE TABLE IF NOT EXISTS public.import_items (
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (job_id, client_key)
 );
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Groupes natifs (arborescence de dossiers dans un coffre)
+-- Ajouts idempotents sur public.secret_folders.
+-- ─────────────────────────────────────────────────────────────────────────────
+ALTER TABLE public.secret_folders ADD COLUMN IF NOT EXISTS description text;
+ALTER TABLE public.secret_folders ADD COLUMN IF NOT EXISTS icon text;
+ALTER TABLE public.secret_folders ADD COLUMN IF NOT EXISTS color text;
+ALTER TABLE public.secret_folders ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+ALTER TABLE public.secret_folders ADD COLUMN IF NOT EXISTS created_by uuid REFERENCES public.users(id) ON DELETE SET NULL;
+ALTER TABLE public.secret_folders ADD COLUMN IF NOT EXISTS source_created_at timestamptz;
+ALTER TABLE public.secret_folders ADD COLUMN IF NOT EXISTS source_modified_at timestamptz;
+ALTER TABLE public.secret_folders ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+DROP TRIGGER IF EXISTS secret_folders_updated ON public.secret_folders;
+CREATE TRIGGER secret_folders_updated BEFORE UPDATE ON public.secret_folders
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE INDEX IF NOT EXISTS secret_folders_parent_idx ON public.secret_folders(parent_id);
+CREATE INDEX IF NOT EXISTS secrets_folder_idx ON public.secrets(folder_id) WHERE deleted_at IS NULL;
