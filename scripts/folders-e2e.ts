@@ -60,26 +60,26 @@ async function mkSecret(workspaceId: string, folderId: string | null, name: stri
 }
 
 async function main() {
-  const owner = await provisionUser({ email: `owner+${crypto.randomUUID()}@test.local`, password: "MotDePasse!123" });
-  const viewer = await provisionUser({ email: `viewer+${crypto.randomUUID()}@test.local`, password: "MotDePasse!123" });
+  const ownerId = await provisionUser(`owner+${crypto.randomUUID()}@test.local`, null);
+  const viewerId = await provisionUser(`viewer+${crypto.randomUUID()}@test.local`, null);
   const ws = (
     await sql<{ id: string }[]>`
-      INSERT INTO workspaces (name, owner_id) VALUES ('Coffre équipe', ${owner.userId}) RETURNING id
+      INSERT INTO workspaces (name, owner_id) VALUES ('Coffre équipe', ${ownerId}) RETURNING id
     `
   )[0]!.id;
-  await sql`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (${ws}, ${owner.userId}, 'OWNER')`;
-  await sql`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (${ws}, ${viewer.userId}, 'VIEWER')`;
+  await sql`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (${ws}, ${ownerId}, 'OWNER')`;
+  await sql`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (${ws}, ${viewerId}, 'VIEWER')`;
 
   // Permissions
   check(
     "un propriétaire peut gérer les groupes",
-    (await requireWorkspacePermission(owner.userId, ws, "folder.manage")) === "OWNER",
+    (await requireWorkspacePermission(ownerId, ws, "folder.manage")) === "OWNER",
   );
   await expectThrows("un lecteur ne peut pas créer de groupe", () =>
-    requireWorkspacePermission(viewer.userId, ws, "folder.create"),
+    requireWorkspacePermission(viewerId, ws, "folder.create"),
   );
   await expectThrows("un lecteur ne peut pas gérer les groupes", () =>
-    requireWorkspacePermission(viewer.userId, ws, "folder.manage"),
+    requireWorkspacePermission(viewerId, ws, "folder.manage"),
   );
 
   // Arborescence
