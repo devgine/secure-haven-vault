@@ -1,0 +1,89 @@
+name: Publish Helm chart
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "helm/secure-haven-vault/**"
+      - ".github/workflows/helm-chart.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "helm/secure-haven-vault/**"
+      - ".github/workflows/helm-chart.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-chart-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CHART_PATH: helm/secure-haven-vault
+  OCI_REGISTRY: ghcr.io
+  OCI_REPOSITORY: ghcr.io/${{ github.repository_owner }}/charts
+
+jobs:
+  publish:
+    name: Validate and publish Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.18.6
+
+      - name: Lint chart
+        run: |
+          helm lint "$CHART_PATH" \
+            --set-string config.masterEncryptionKey=ci-validation-key \
+            --set-string postgresql.auth.password=ci-validation-password
+
+      - name: Render chart
+        run: |
+          helm template secure-haven-vault "$CHART_PATH" \
+            --set-string config.masterEncryptionKey=ci-validation-key \
+            --set-string postgresql.auth.password=ci-validation-password \
+            > /tmp/secure-haven-vault.yaml
+
+      - name: Package chart
+        id: package
+        shell: bash
+        run: |
+          mkdir -p dist
+          helm package "$CHART_PATH" --destination dist
+          chart_version="$(helm show chart "$CHART_PATH" | awk '$1 == "version:" { print $2 }')"
+          echo "package=dist/secure-haven-vault-${chart_version}.tgz" >> "$GITHUB_OUTPUT"
+          echo "version=${chart_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login "$OCI_REGISTRY" \
+            --username "${{ github.actor }}" \
+            --password-stdin
+
+      - name: Publish chart to GHCR
+        if: github.event_name != 'pull_request'
+        run: helm push "${{ steps.package.outputs.package }}" "oci://$OCI_REPOSITORY"
+
+      - name: Write publication summary
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "## Helm chart published" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "oci://$OCI_REPOSITORY/secure-haven-vault" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Version: ${{ steps.package.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
