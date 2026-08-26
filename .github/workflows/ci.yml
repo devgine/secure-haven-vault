@@ -39,6 +39,7 @@ jobs:
       - name: Run tests
         run: bunx vitest run --passWithNoTests
 
+      # ESLint validates code quality; formatting is handled separately by Prettier.
       - name: Run lint
         run: bun run lint
 
