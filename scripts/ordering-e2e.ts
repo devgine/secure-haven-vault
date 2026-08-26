@@ -132,7 +132,8 @@ async function main() {
   // 4. Réordonnancement de secrets à la racine
   await moveItems({ ...base, kind: "secret", ids: [s3], parentId: null, index: 0 });
   check("secret remonté en tête", (await secretOrder(ws, null)).join() === "Racine 3,Racine 1,Racine 2");
-  await moveItems({ ...base, kind: "secret", ids: [s3], parentId: null, index: 2 });
+  // L'index est exprimé dans la liste affichée (élément déplacé inclus).
+  await moveItems({ ...base, kind: "secret", ids: [s3], parentId: null, index: 3 });
   check("secret redescendu", (await secretOrder(ws, null)).join() === "Racine 1,Racine 2,Racine 3");
   check("positions 0..n sans trou", (await positions(ws, null)).join() === "0,1,2");
 
