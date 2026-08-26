@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
@@ -40,6 +40,20 @@ import { SecretRow } from "@/components/vault/secret-row";
 import { FolderTree, type FolderSelection } from "@/components/vault/folder-tree";
 import { FolderPicker } from "@/components/vault/folder-picker";
 import { listFolders, moveSecrets } from "@/lib/folders.functions";
+import { getTreeVersion, moveTreeItems } from "@/lib/ordering.functions";
+import {
+  DragHandle,
+  DropIndicator,
+  VaultDndProvider,
+  useOrganizerItem,
+  useOrganizerRoot,
+} from "@/components/vault/dnd-organizer";
+import {
+  applyFolderPlan,
+  applySecretPlan,
+  destinationLabel,
+  type DropPlan,
+} from "@/lib/ordering";
 import { folderAncestry, subtreeIds } from "@/lib/folders";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -57,7 +71,7 @@ import {
   updateWorkspace,
 } from "@/lib/vault.functions";
 import { ROLE_LABELS, type WorkspaceRole } from "@/lib/permissions";
-import type { SecretDetail } from "@/lib/types";
+import type { FolderDto, SecretDetail, SecretListItem } from "@/lib/types";
 
 interface WorkspaceSearch {
   secret?: string | undefined;
@@ -171,6 +185,8 @@ function WorkspacePage() {
   const removeMemberFn = useServerFn(removeMember);
   const updateRoleFn = useServerFn(updateMemberRole);
   const moveSecretsFn = useServerFn(moveSecrets);
+  const moveTreeFn = useServerFn(moveTreeItems);
+  const expandHandlerRef = useRef<((folderId: string) => void) | null>(null);
 
   const { data: workspaces } = useQuery({ queryKey: ["workspaces"], queryFn: () => listWorkspaces() });
   const workspace = useMemo(
@@ -202,6 +218,54 @@ function WorkspacePage() {
   });
 
   const folderList = folders ?? [];
+
+  const { data: treeVersion } = useQuery({
+    queryKey: ["tree-version", workspaceId],
+    queryFn: () => getTreeVersion({ data: { workspaceId } }),
+    refetchInterval: 20000,
+  });
+
+  // Le réordonnancement manuel est réservé aux rôles qui peuvent modifier
+  // le contenu du coffre ; le serveur revérifie la permission de toute façon.
+  const canOrganize = role === "OWNER" || role === "ADMIN" || role === "EDITOR";
+
+  // Application optimiste : l'UI se met à jour immédiatement, puis on
+  // persiste. En cas d'échec ou de conflit, on restaure l'état serveur.
+  const applyDrop = async (plan: DropPlan) => {
+    const prevFolders = queryClient.getQueryData<FolderDto[]>(["folders", workspaceId]);
+    const prevSecrets = queryClient.getQueryData<SecretListItem[]>(["secrets", workspaceId]);
+    if (plan.kind === "folder" && prevFolders) {
+      queryClient.setQueryData(["folders", workspaceId], applyFolderPlan(prevFolders, plan));
+    }
+    if (plan.kind === "secret" && prevSecrets) {
+      queryClient.setQueryData(["secrets", workspaceId], applySecretPlan(prevSecrets, plan));
+    }
+    try {
+      const res = await moveTreeFn({
+        data: {
+          workspaceId,
+          kind: plan.kind,
+          ids: plan.ids,
+          parentId: plan.parentId,
+          index: plan.index,
+          expectedVersion: treeVersion?.version ?? -1,
+        },
+      });
+      queryClient.setQueryData(["tree-version", workspaceId], { version: res.version });
+      toast.success(
+        `${res.moved} élément(s) → ${destinationLabel(folderList, plan.parentId)}`,
+      );
+      setChecked(new Set());
+    } catch (err) {
+      if (prevFolders) queryClient.setQueryData(["folders", workspaceId], prevFolders);
+      if (prevSecrets) queryClient.setQueryData(["secrets", workspaceId], prevSecrets);
+      toast.error((err as Error).message);
+    } finally {
+      await queryClient.invalidateQueries({ queryKey: ["folders", workspaceId] });
+      await queryClient.invalidateQueries({ queryKey: ["secrets", workspaceId] });
+      await queryClient.invalidateQueries({ queryKey: ["tree-version", workspaceId] });
+    }
+  };
 
   // Périmètre courant : tout le coffre, les secrets sans groupe, ou un groupe
   // (avec ou sans ses sous-groupes).
@@ -341,6 +405,14 @@ function WorkspacePage() {
         </TabsList>
 
         <TabsContent value="secrets" className="pt-4">
+          <VaultDndProvider
+            enabled={canOrganize}
+            folders={folderList}
+            secrets={secrets ?? []}
+            onExpandFolder={(id) => expandHandlerRef.current?.(id)}
+            onInvalid={(reason) => toast.error(reason)}
+            onDrop={(plan) => void applyDrop(plan)}
+          >
           <div className="grid gap-6 md:grid-cols-[240px_1fr]">
             <aside className="md:sticky md:top-4 md:self-start">
               <FolderTree
@@ -354,6 +426,7 @@ function WorkspacePage() {
                 canManage={canCreate}
                 totalCount={secrets?.length ?? 0}
                 unfiledCount={unfiledCount}
+                expandHandlerRef={expandHandlerRef}
               />
             </aside>
 
@@ -419,21 +492,20 @@ function WorkspacePage() {
               ) : (
                 <div className="space-y-2">
                   {filtered.map((s) => (
-                    <div key={s.id} className="flex items-center gap-2">
-                      {canCreate && (
-                        <Checkbox
-                          checked={checked.has(s.id)}
-                          onCheckedChange={() => toggleChecked(s.id)}
-                          aria-label={`Sélectionner ${s.name}`}
-                        />
-                      )}
-                      <button onClick={() => openSecret(s.id)} className="block min-w-0 flex-1 text-left">
-                        <div className="pointer-events-none">
-                          <SecretRow secret={s} />
-                        </div>
-                      </button>
-                    </div>
+                    <DraggableSecretRow
+                      key={s.id}
+                      secret={s}
+                      selectedIds={[...checked]}
+                      canOrganize={canOrganize}
+                      showCheckbox={canCreate}
+                      checked={checked.has(s.id)}
+                      onToggleChecked={() => toggleChecked(s.id)}
+                      onOpen={() => openSecret(s.id)}
+                    />
                   ))}
+                  <VaultRootDropZone
+                    visible={canOrganize && selection.kind !== "folder"}
+                  />
                 </div>
               )}
             </div>
@@ -457,6 +529,7 @@ function WorkspacePage() {
               </DialogFooter>
             </DialogContent>
           </Dialog>
+          </VaultDndProvider>
         </TabsContent>
 
         {!workspace?.isPersonal && (
@@ -657,6 +730,71 @@ function WorkspacePage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+/** Ligne de secret déplaçable — l'aperçu de drag ne contient que le nom. */
+function DraggableSecretRow({
+  secret,
+  selectedIds,
+  canOrganize,
+  showCheckbox,
+  checked,
+  onToggleChecked,
+  onOpen,
+}: {
+  secret: SecretListItem;
+  selectedIds: string[];
+  canOrganize: boolean;
+  showCheckbox: boolean;
+  checked: boolean;
+  onToggleChecked: () => void;
+  onOpen: () => void;
+}) {
+  const ids = checked && selectedIds.length > 1 ? selectedIds : [secret.id];
+  const dnd = useOrganizerItem({
+    kind: "secret",
+    id: secret.id,
+    ids,
+    label: secret.name,
+    disabled: !canOrganize,
+  });
+  return (
+    <div
+      ref={dnd.setNodeRef}
+      {...dnd.dndProps}
+      className={`group relative flex items-center gap-2 rounded-lg ${dnd.isDragging ? "opacity-40" : ""} ${dnd.rejected ? "ring-1 ring-destructive" : ""}`}
+    >
+      <DropIndicator edge={dnd.indicator} />
+      {canOrganize && <DragHandle label={secret.name} {...dnd.handleProps} />}
+      {showCheckbox && (
+        <Checkbox
+          checked={checked}
+          onCheckedChange={onToggleChecked}
+          aria-label={`Sélectionner ${secret.name}`}
+        />
+      )}
+      <button onClick={onOpen} className="block min-w-0 flex-1 text-left">
+        <div className="pointer-events-none">
+          <SecretRow secret={secret} />
+        </div>
+      </button>
+    </div>
+  );
+}
+
+/** Zone de dépôt « racine du coffre » sous la liste. */
+function VaultRootDropZone({ visible }: { visible: boolean }) {
+  const root = useOrganizerRoot();
+  if (!visible) return null;
+  return (
+    <div
+      ref={root.setNodeRef}
+      {...root.dndProps}
+      className={`rounded-lg border border-dashed py-3 text-center text-xs text-muted-foreground ${root.isTarget ? "border-primary text-primary" : ""}`}
+    >
+      Déposer ici pour placer à la racine du coffre
     </div>
   );
 }

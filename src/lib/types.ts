@@ -58,6 +58,8 @@ export interface SecretListItem {
   id: string;
   workspaceId: string;
   folderId: string | null;
+  /** Ordre manuel dans son groupe (ou à la racine). */
+  position: number;
   workspaceName?: string | undefined;
   type: SecretType;
   name: string;
