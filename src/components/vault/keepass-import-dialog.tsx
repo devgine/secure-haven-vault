@@ -585,7 +585,10 @@ export function KeepassImportDialog({ open, onOpenChange, workspaceId, onImporte
                       checked={items.every((e) => selected.has(e.uuid))}
                       onCheckedChange={(v) => {
                         const next = new Set(selected);
-                        for (const e of items) v ? next.add(e.uuid) : next.delete(e.uuid);
+                        for (const e of items) {
+                          if (v) next.add(e.uuid);
+                          else next.delete(e.uuid);
+                        }
                         setSelected(next);
                       }}
                     />
@@ -597,7 +600,8 @@ export function KeepassImportDialog({ open, onOpenChange, workspaceId, onImporte
                         checked={selected.has(e.uuid)}
                         onCheckedChange={(v) => {
                           const next = new Set(selected);
-                          v ? next.add(e.uuid) : next.delete(e.uuid);
+                          if (v) next.add(e.uuid);
+                          else next.delete(e.uuid);
                           setSelected(next);
                         }}
                       />
