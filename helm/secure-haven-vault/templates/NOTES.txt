@@ -1,0 +1,7 @@
+1. Configure a TLS ingress host in values.yaml.
+2. Keep MASTER_ENCRYPTION_KEY outside Git and back it up separately.
+3. Install:
+   helm upgrade --install secure-haven-vault ./helm/secure-haven-vault \
+     --namespace secure-haven-vault --create-namespace \
+     --set-string config.masterEncryptionKey='<64 hex characters>' \
+     --set-string postgresql.auth.password='<strong password>'
