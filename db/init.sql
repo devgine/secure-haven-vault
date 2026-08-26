@@ -299,3 +299,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS secret_folders_unique_child
 CREATE UNIQUE INDEX IF NOT EXISTS secret_folders_unique_root
   ON public.secret_folders(workspace_id, lower(name))
   WHERE parent_id IS NULL AND deleted_at IS NULL;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Organisation manuelle (glisser-déposer) : ordre persistant des groupes et
+-- des secrets, plus un compteur de version par coffre pour détecter les
+-- modifications simultanées. Idempotent.
+-- ─────────────────────────────────────────────────────────────────────────────
+ALTER TABLE public.secrets ADD COLUMN IF NOT EXISTS position integer NOT NULL DEFAULT 0;
+ALTER TABLE public.workspaces ADD COLUMN IF NOT EXISTS tree_version integer NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS secrets_order_idx
+  ON public.secrets(workspace_id, folder_id, position) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS secret_folders_order_idx
+  ON public.secret_folders(workspace_id, parent_id, position) WHERE deleted_at IS NULL;
+
+-- Ordre initial déterministe pour les données existantes (import compris).
+WITH ranked AS (
+  SELECT id, row_number() OVER (
+           PARTITION BY workspace_id, folder_id ORDER BY created_at, id
+         ) - 1 AS rn
+  FROM public.secrets WHERE deleted_at IS NULL
+)
+UPDATE public.secrets s SET position = ranked.rn
+FROM ranked WHERE ranked.id = s.id AND s.position = 0 AND ranked.rn <> 0;

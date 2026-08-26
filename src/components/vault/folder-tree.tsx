@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type MutableRefObject } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import {
@@ -48,6 +48,11 @@ import {
   moveFolder,
   updateFolder,
 } from "@/lib/folders.functions";
+import {
+  DragHandle,
+  DropIndicator,
+  useOrganizerItem,
+} from "@/components/vault/dnd-organizer";
 import { cn } from "@/lib/utils";
 import type { FolderDto, FolderNode } from "@/lib/types";
 
@@ -61,6 +66,7 @@ export function FolderTree({
   canManage,
   totalCount,
   unfiledCount,
+  expandHandlerRef,
 }: {
   workspaceId: string;
   folders: FolderDto[];
@@ -69,6 +75,8 @@ export function FolderTree({
   canManage: boolean;
   totalCount: number;
   unfiledCount: number;
+  /** Permet au glisser-déposer de déplier un groupe survolé. */
+  expandHandlerRef?: MutableRefObject<((folderId: string) => void) | null>;
 }) {
   const queryClient = useQueryClient();
   const createFn = useServerFn(createFolder);
@@ -78,6 +86,20 @@ export function FolderTree({
 
   const tree = useMemo(() => buildFolderTree(folders), [folders]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!expandHandlerRef) return;
+    expandHandlerRef.current = (folderId: string) =>
+      setCollapsed((prev) => {
+        if (!prev.has(folderId)) return prev;
+        const next = new Set(prev);
+        next.delete(folderId);
+        return next;
+      });
+    return () => {
+      expandHandlerRef.current = null;
+    };
+  }, [expandHandlerRef]);
   const [busy, setBusy] = useState(false);
 
   const [createOpen, setCreateOpen] = useState(false);
@@ -193,88 +215,32 @@ export function FolderTree({
     }
   };
 
-  const renderNode = (node: FolderNode) => {
-    const isSelected = selection.kind === "folder" && selection.id === node.id;
-    const isCollapsed = collapsed.has(node.id);
-    const hasChildren = node.children.length > 0;
-    return (
-      <div key={node.id}>
-        <div
-          className={cn(
-            "group flex items-center gap-1 rounded-md pr-1 text-sm",
-            isSelected ? "bg-primary/10 text-primary" : "hover:bg-muted",
-          )}
-          style={{ paddingLeft: `${node.depth * 14}px` }}
-        >
-          <button
-            type="button"
-            aria-label={isCollapsed ? "Déplier" : "Replier"}
-            className="flex h-6 w-5 shrink-0 items-center justify-center text-muted-foreground"
-            onClick={() => hasChildren && toggle(node.id)}
-          >
-            {hasChildren ? (
-              isCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />
-            ) : null}
-          </button>
-          <button
-            type="button"
-            onClick={() => onSelect({ kind: "folder", id: node.id })}
-            className="flex min-w-0 flex-1 items-center gap-2 py-1.5 text-left"
-          >
-            {isSelected ? (
-              <FolderOpen className="h-4 w-4 shrink-0" />
-            ) : (
-              <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
-            )}
-            <span className="truncate">{node.name}</span>
-            <span className="ml-auto shrink-0 text-xs text-muted-foreground">{node.totalCount}</span>
-          </button>
-          {canManage && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100">
-                  <MoreHorizontal className="h-3.5 w-3.5" />
-                  <span className="sr-only">Actions du groupe</span>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => openCreate(node.id)}>
-                  <FolderPlus className="mr-2 h-3.5 w-3.5" /> Nouveau sous-groupe
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => {
-                    setEditTarget(node);
-                    setEditName(node.name);
-                    setEditDesc(node.description ?? "");
-                  }}
-                >
-                  <Pencil className="mr-2 h-3.5 w-3.5" /> Renommer
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => {
-                    setMoveTarget(node);
-                    setMoveParent(node.parentId);
-                  }}
-                >
-                  <MoveRight className="mr-2 h-3.5 w-3.5" /> Déplacer
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  className="text-destructive focus:text-destructive"
-                  onClick={() => {
-                    setDeleteTarget(node);
-                    setDeleteMode("detach");
-                  }}
-                >
-                  <Trash2 className="mr-2 h-3.5 w-3.5" /> Supprimer
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-        </div>
-        {!isCollapsed && node.children.map(renderNode)}
-      </div>
-    );
-  };
+  const renderNode = (node: FolderNode) => (
+    <FolderNodeRow
+      key={node.id}
+      node={node}
+      selection={selection}
+      collapsed={collapsed}
+      canManage={canManage}
+      onToggle={toggle}
+      onSelect={onSelect}
+      onCreateChild={openCreate}
+      onEdit={(n) => {
+        setEditTarget(n);
+        setEditName(n.name);
+        setEditDesc(n.description ?? "");
+      }}
+      onMove={(n) => {
+        setMoveTarget(n);
+        setMoveParent(n.parentId);
+      }}
+      onDelete={(n) => {
+        setDeleteTarget(n);
+        setDeleteMode("detach");
+      }}
+    />
+  );
+
 
   return (
     <div className="space-y-2">
@@ -438,6 +404,127 @@ export function FolderTree({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+/** Ligne d'arborescence : sélection, actions, et cible de glisser-déposer. */
+function FolderNodeRow({
+  node,
+  selection,
+  collapsed,
+  canManage,
+  onToggle,
+  onSelect,
+  onCreateChild,
+  onEdit,
+  onMove,
+  onDelete,
+}: {
+  node: FolderNode;
+  selection: FolderSelection;
+  collapsed: Set<string>;
+  canManage: boolean;
+  onToggle: (id: string) => void;
+  onSelect: (s: FolderSelection) => void;
+  onCreateChild: (parentId: string | null) => void;
+  onEdit: (n: FolderNode) => void;
+  onMove: (n: FolderNode) => void;
+  onDelete: (n: FolderNode) => void;
+}) {
+  const isSelected = selection.kind === "folder" && selection.id === node.id;
+  const isCollapsed = collapsed.has(node.id);
+  const hasChildren = node.children.length > 0;
+  const dnd = useOrganizerItem({
+    kind: "folder",
+    id: node.id,
+    label: node.name,
+    disabled: !canManage,
+  });
+
+  return (
+    <div>
+      <div
+        ref={dnd.setNodeRef}
+        {...dnd.dndProps}
+        className={cn(
+          "group relative flex items-center gap-1 rounded-md pr-1 text-sm",
+          isSelected ? "bg-primary/10 text-primary" : "hover:bg-muted",
+          dnd.isDragging && "opacity-40",
+          dnd.indicator === "inside" && "ring-1 ring-primary",
+          dnd.rejected && "ring-1 ring-destructive",
+        )}
+        style={{ paddingLeft: `${node.depth * 14}px` }}
+      >
+        <DropIndicator edge={dnd.indicator} />
+        {canManage && <DragHandle label={node.name} {...dnd.handleProps} />}
+        <button
+          type="button"
+          aria-label={isCollapsed ? "Déplier" : "Replier"}
+          className="flex h-6 w-5 shrink-0 items-center justify-center text-muted-foreground"
+          onClick={() => hasChildren && onToggle(node.id)}
+        >
+          {hasChildren ? (
+            isCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />
+          ) : null}
+        </button>
+        <button
+          type="button"
+          onClick={() => onSelect({ kind: "folder", id: node.id })}
+          className="flex min-w-0 flex-1 items-center gap-2 py-1.5 text-left"
+        >
+          {isSelected ? (
+            <FolderOpen className="h-4 w-4 shrink-0" />
+          ) : (
+            <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
+          )}
+          <span className="truncate">{node.name}</span>
+          <span className="ml-auto shrink-0 text-xs text-muted-foreground">{node.totalCount}</span>
+        </button>
+        {canManage && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100">
+                <MoreHorizontal className="h-3.5 w-3.5" />
+                <span className="sr-only">Actions du groupe</span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => onCreateChild(node.id)}>
+                <FolderPlus className="mr-2 h-3.5 w-3.5" /> Nouveau sous-groupe
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onEdit(node)}>
+                <Pencil className="mr-2 h-3.5 w-3.5" /> Renommer
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onMove(node)}>
+                <MoveRight className="mr-2 h-3.5 w-3.5" /> Déplacer
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                onClick={() => onDelete(node)}
+              >
+                <Trash2 className="mr-2 h-3.5 w-3.5" /> Supprimer
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+      </div>
+      {!isCollapsed &&
+        node.children.map((child) => (
+          <FolderNodeRow
+            key={child.id}
+            node={child}
+            selection={selection}
+            collapsed={collapsed}
+            canManage={canManage}
+            onToggle={onToggle}
+            onSelect={onSelect}
+            onCreateChild={onCreateChild}
+            onEdit={onEdit}
+            onMove={onMove}
+            onDelete={onDelete}
+          />
+        ))}
     </div>
   );
 }

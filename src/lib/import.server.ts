@@ -294,9 +294,14 @@ export async function runImportBatch(params: BatchParams): Promise<BatchResult> 
         }
 
         const inserted = await tx<{ id: string }[]>`
-          INSERT INTO secrets (workspace_id, folder_id, type, name, username, url, description, tags,
+          INSERT INTO secrets (workspace_id, folder_id, position, type, name, username, url, description, tags,
                                icon, source_created_at, source_modified_at, created_by, updated_by)
-          VALUES (${job.workspace_id}, ${folderId}, ${item.type}, ${item.name.slice(0, 200)},
+          VALUES (${job.workspace_id}, ${folderId},
+                  (SELECT coalesce(max(position), -1) + 1 FROM secrets
+                    WHERE workspace_id = ${job.workspace_id}
+                      AND folder_id IS NOT DISTINCT FROM ${folderId}
+                      AND deleted_at IS NULL),
+                  ${item.type}, ${item.name.slice(0, 200)},
                   ${item.username}, ${item.url}, ${item.description}, ${tx.array(item.tags)},
                   ${item.icon}, ${item.sourceCreatedAt}, ${item.sourceModifiedAt},
                   ${params.userId}, ${params.userId})
