@@ -32,16 +32,13 @@ ENV NODE_ENV=production \
 
 ARG UID=10005
 ENV UID=$UID
-ARG GID=10005
-ENV GID=$GID
 ARG USER=vault
 ENV USER=$USER
 
-RUN addgroup --system --gid "$GID" "$USER" && \
-  adduser --system --uid "$UID" --ingroup "$USER" "$USER"
+RUN adduser -D -u "$UID" "$USER"
 
 COPY --from=build --chown=vault:vault /app/.output ./.output
-USER vault
+USER $UID
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD wget -q -O /dev/null http://127.0.0.1:3000/api/public/health || exit 1
