@@ -29,7 +29,17 @@ WORKDIR /app
 ENV NODE_ENV=production \
     PORT=3000 \
     HOST=0.0.0.0
-RUN addgroup -S vault && adduser -S vault -G vault
+
+ARG UID=10005
+ENV UID=$UID
+ARG GID=10005
+ENV GID=$GID
+ARG USER=vault
+ENV USER=$USER
+
+RUN addgroup --system --gid "$GID" "$USER" && \
+  adduser --system --uid "$UID" --ingroup "$USER" "$USER"
+
 COPY --from=build --chown=vault:vault /app/.output ./.output
 USER vault
 EXPOSE 3000
