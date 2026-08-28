@@ -47,7 +47,6 @@ spec:
       securityContext:
         runAsUser: 999
         runAsGroup: 999
-        runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       initContainers:
@@ -57,15 +56,19 @@ spec:
             - sh
             - -c
             - |
-              chown -R 999:999 /var/lib/postgresql/data
+              chown -R 999:999 /var/lib/postgresql
           securityContext:
             runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql
       containers:
         - name: postgresql
           image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
           imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
             capabilities:
               drop: [ALL]
           env:
