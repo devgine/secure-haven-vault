@@ -45,7 +45,9 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       securityContext:
-        fsGroup: 70
+        runAsUser: 999
+        runAsGroup: 999
+        runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -93,6 +95,7 @@ spec:
       volumes:
         - name: init
           configMap:
+            defaultMode: 644
             name: {{ include "secure-haven-vault.postgresqlName" . }}-init
         {{- if not .Values.postgresql.persistence.enabled }}
         - name: data
