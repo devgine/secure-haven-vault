@@ -25,6 +25,7 @@ RUN bun run build
 
 # ── Étape 3 : runtime minimal (non-root) ─────────────────────────────────────
 FROM node:22-alpine AS runtime
+RUN apt update && apt -y install wget && apt clean
 WORKDIR /app
 ENV NODE_ENV=production \
     PORT=3000 \
@@ -43,3 +44,10 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD wget -q -O /dev/null http://127.0.0.1:3000/api/public/health || exit 1
 CMD ["node", ".output/server/index.mjs"]
+
+FROM deps AS dev
+RUN apt update && apt -y install wget && apt clean
+EXPOSE 3000
+ENV NODE_ENV=development
+VOLUME /app/node_modules
+CMD ["bun", "run", "dev"]

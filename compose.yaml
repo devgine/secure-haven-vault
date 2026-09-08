@@ -20,6 +20,7 @@ services:
     container_name: ${PROJECT_NAME}_app
     build:
       context: .
+      target: dev
     image: sentinel-vault:latest
     restart: unless-stopped
     environment:
@@ -33,15 +34,17 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    volumes:
+      - .:/app
     labels:
       - traefik.enable=true
       - traefik.docker.network=${TRAEFIK_NETWORK}
       - traefik.http.routers.${PROJECT_NAME}-app.rule=Host(`${APP_DOMAIN}`)
       - traefik.http.routers.${PROJECT_NAME}-app.entrypoints=websecure
       - traefik.http.routers.${PROJECT_NAME}-app.tls=true
-      - traefik.http.services.${PROJECT_NAME}-app.loadbalancer.server.port=3000
+      - traefik.http.services.${PROJECT_NAME}-app.loadbalancer.server.port=8080
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/public/health"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/api/public/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -73,7 +76,7 @@ services:
 
   exporter:
     container_name: ${PROJECT_NAME}_exporter
-    image: harbor.opcomobilites.fr/dockerhub-proxy/prometheuscommunity/postgres-exporter:latest
+    image: prometheuscommunity/postgres-exporter:latest
     restart: unless-stopped
     environment:
       PG_EXPORTER_EXTEND_QUERY_PATH: /etc/postgres_exporter/queries.yaml
