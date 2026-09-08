@@ -1,0 +1,18 @@
+---
+secret_expiry:
+  query: |
+    SELECT
+      name,
+      EXTRACT(
+        EPOCH FROM (expires_at - now())
+      ) / 86400 AS days_remaining
+    FROM secrets
+    WHERE expires_at > now()
+  metrics:
+    - name:
+        usage: LABEL
+        description: Secret name
+
+    - days_remaining:
+        usage: GAUGE
+        description: Days before expiration

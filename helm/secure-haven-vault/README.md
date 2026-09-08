@@ -21,6 +21,7 @@ Generate the encryption key and database password, then store them securely:
 ```bash
 MASTER_ENCRYPTION_KEY="$(openssl rand -hex 32)"
 POSTGRES_PASSWORD="$(openssl rand -base64 32)"
+POSTGRES_EXPORTER_URL="postgres://exporter:${POSTGRES_PASSWORD}@secure-haven-vault-postgresql:5432/vault"
 ```
 
 Install version `0.1.0` directly from GHCR:
@@ -33,6 +34,7 @@ helm upgrade --install secure-haven-vault \
   --create-namespace \
   --set-string config.masterEncryptionKey="$MASTER_ENCRYPTION_KEY" \
   --set-string postgresql.auth.password="$POSTGRES_PASSWORD" \
+  --set-string postgresqlExporter.datasource.url="$POSTGRES_EXPORTER_URL" \
   --set ingress.enabled=true \
   --set ingress.className=traefik \
   --set ingress.hosts[0].host=vault.example.com

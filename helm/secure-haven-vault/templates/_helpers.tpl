@@ -22,6 +22,19 @@ app.kubernetes.io/name: {{ include "secure-haven-vault.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
+{{- define "secure-haven-vault.exporter.labels" -}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
+app.kubernetes.io/name: {{ include "secure-haven-vault.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{- define "secure-haven-vault.exporter.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "secure-haven-vault.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
 {{- define "secure-haven-vault.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}{{ default (include "secure-haven-vault.fullname" .) .Values.serviceAccount.name }}{{- else }}{{ default "default" .Values.serviceAccount.name }}{{- end }}
 {{- end }}

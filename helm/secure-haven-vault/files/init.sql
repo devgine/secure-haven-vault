@@ -321,3 +321,15 @@ WITH ranked AS (
 )
 UPDATE public.secrets s SET position = ranked.rn
 FROM ranked WHERE ranked.id = s.id AND s.position = 0 AND ranked.rn <> 0;
+
+-- Create exporter user for metrics generation
+CREATE USER exporter WITH PASSWORD 'strong-password';
+
+GRANT CONNECT ON DATABASE vault TO exporter;
+
+GRANT USAGE ON SCHEMA public TO exporter;
+
+GRANT SELECT ON TABLE secrets TO exporter;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT SELECT ON TABLES TO exporter;

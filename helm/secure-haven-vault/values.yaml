@@ -112,5 +112,22 @@ postgresql:
     limits:
       memory: 1Gi
 
+postgresqlExporter:
+  enabled: false
+  podLabels: {}
+  podSecurityContext: {}
+  imagePullSecrets: []
+  image:
+    repository: prometheuscommunity/postgres-exporter
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  datasource:
+    url: ""
+    existingSecret: ""
+    urlKey: postgres-data-source
+
 externalDatabase:
   url: ""
+
+#externalExporter:
+#  url: ""

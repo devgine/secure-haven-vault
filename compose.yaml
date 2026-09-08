@@ -71,6 +71,29 @@ services:
     networks:
       - internal
 
+  exporter:
+    container_name: ${PROJECT_NAME}_exporter
+    image: harbor.opcomobilites.fr/dockerhub-proxy/prometheuscommunity/postgres-exporter:latest
+    restart: unless-stopped
+    environment:
+      PG_EXPORTER_EXTEND_QUERY_PATH: /etc/postgres_exporter/queries.yaml
+      DATA_SOURCE_NAME: ${DATABASE_URL:-postgres://${POSTGRES_EXPORTER_USER:-exporter}:${POSTGRES_EXPORTER_PASSWORD:?renseignez POSTGRES_EXPORTER_PASSWORD dans .env}@db:5432/${POSTGRES_DB:-vault}}
+    depends_on:
+      db:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK}
+      - traefik.http.routers.${PROJECT_NAME}-exporter.rule=Host(`${APP_DOMAIN}`) && Path('/metrics')
+      - traefik.http.routers.${PROJECT_NAME}-exporter.entrypoints=websecure
+      - traefik.http.routers.${PROJECT_NAME}-exporter.tls=true
+      - traefik.http.services.${PROJECT_NAME}-exporter.loadbalancer.server.port=9187
+    volumes:
+      - ./db/queries.yaml:/etc/postgres_exporter/queries.yaml
+    networks:
+      - internal
+      - traefik-network
+
 volumes:
   pgdata:
 
