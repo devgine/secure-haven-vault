@@ -67,7 +67,7 @@ jobs:
         run: |
           mkdir -p dist
           helm package "$CHART_PATH" --destination dist
-          chart_version="$(helm show chart "$CHART_PATH" | awk '$1 == "version:" { print $2 }')"
+          chart_version="$(yq '.version' "$CHART_PATH/Chart.yaml")"
           echo "package=dist/secure-haven-vault-${chart_version}.tgz" >> "$GITHUB_OUTPUT"
           echo "version=${chart_version}" >> "$GITHUB_OUTPUT"
 
