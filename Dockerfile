@@ -25,7 +25,7 @@ RUN bun run build
 
 # ── Étape 3 : runtime minimal (non-root) ─────────────────────────────────────
 FROM node:22-alpine AS runtime
-RUN apt update && apt -y install wget && apt clean
+RUN apk update && apk add --no-cache wget
 WORKDIR /app
 ENV NODE_ENV=production \
     PORT=3000 \
