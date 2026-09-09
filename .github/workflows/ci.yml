@@ -35,18 +35,22 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+        working-directory: srv
 
       - name: Run tests
         run: bunx vitest run --passWithNoTests
+        working-directory: srv
 
       # ESLint validates code quality; formatting is handled separately by Prettier.
       - name: Run lint
         run: bun run lint
+        working-directory: srv
 
       - name: Build application
         env:
           NITRO_PRESET: node-server
         run: bun run build
+        working-directory: srv
 
   container:
     name: Build and publish container image

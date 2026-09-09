@@ -64,7 +64,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql
       # Schéma appliqué automatiquement au premier démarrage (base vierge)
-      - ./db/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./helm/secure-haven-vault/files/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -92,7 +92,7 @@ services:
       - traefik.http.routers.${PROJECT_NAME}-exporter.tls=true
       - traefik.http.services.${PROJECT_NAME}-exporter.loadbalancer.server.port=9187
     volumes:
-      - ./db/queries.yaml:/etc/postgres_exporter/queries.yaml
+      - ./.docker/exporter/queries.yaml:/etc/postgres_exporter/queries.yaml
     networks:
       - internal
       - traefik-network
