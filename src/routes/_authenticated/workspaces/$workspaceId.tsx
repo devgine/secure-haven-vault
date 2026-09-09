@@ -217,7 +217,7 @@ function WorkspacePage() {
     queryFn: () => listMembers({ data: { workspaceId } }),
   });
 
-  const folderList = folders ?? [];
+  const folderList = useMemo(() => folders ?? [], [folders]);
 
   const { data: treeVersion } = useQuery({
     queryKey: ["tree-version", workspaceId],
