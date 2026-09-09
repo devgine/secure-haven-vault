@@ -51,6 +51,9 @@ jobs:
             --set-string config.masterEncryptionKey=ci-validation-key \
             --set-string postgresql.auth.password=ci-validation-password
 
+      - name: Build dependencies
+        run: helm dependencies build "$CHART_PATH"
+
       - name: Render chart
         run: |
           helm template secure-haven-vault "$CHART_PATH" \
