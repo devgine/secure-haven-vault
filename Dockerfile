@@ -12,14 +12,14 @@
 # ── Étape 1 : dépendances ────────────────────────────────────────────────────
 FROM oven/bun:1 AS deps
 WORKDIR /app
-COPY package.json bun.lock ./
+COPY srv/package.json srv/bun.lock ./
 RUN bun install --frozen-lockfile
 
 # ── Étape 2 : build de production (preset Node autonome) ─────────────────────
 FROM oven/bun:1 AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+COPY srv/ .
 ENV NITRO_PRESET=node-server
 RUN bun run build
 
@@ -47,7 +47,7 @@ CMD ["node", ".output/server/index.mjs"]
 
 FROM deps AS dev
 RUN apt update && apt -y install wget && apt clean
-EXPOSE 3000
+EXPOSE 8080
 ENV NODE_ENV=development
 VOLUME /app/node_modules
 CMD ["bun", "run", "dev"]
