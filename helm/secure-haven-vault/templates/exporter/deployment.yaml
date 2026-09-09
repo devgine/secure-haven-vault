@@ -41,7 +41,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ include "secure-haven-vault.appSecretName" . }}-exporter
-                  key: DATA_SOURCE_NAME
+                  key: {{ .Values.postgresqlExporter.datasource.urlKey }}
             - name: PG_EXPORTER_EXTEND_QUERY_PATH
               value: /etc/postgres_exporter/queries.yaml
           volumeMounts:
