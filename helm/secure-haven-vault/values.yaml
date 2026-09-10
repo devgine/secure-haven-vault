@@ -119,7 +119,7 @@ prometheus-postgres-exporter:
   extraEnvs:
     - name: PG_EXPORTER_EXTEND_QUERY_PATH
       value: /etc/postgres_exporter/queries.yaml
-  extraVolumes: /etc/postgres_exporter/queries.yaml
+  extraVolumes:
     - name: queries
       configMap:
         name: postgres-custom-queries
