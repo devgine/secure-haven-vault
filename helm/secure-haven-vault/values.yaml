@@ -114,6 +114,18 @@ postgresql:
 
 prometheus-postgres-exporter:
   enabled: false
+  serviceMonitor:
+    enabled: true
+  extraEnvs:
+    - name: PG_EXPORTER_EXTEND_QUERY_PATH
+      value: /etc/postgres_exporter/queries.yaml
+  extraVolumes: /etc/postgres_exporter/queries.yaml
+    - name: queries
+      configMap:
+        name: postgres-custom-queries
+  extraVolumeMounts:
+    - name: queries
+      mountPath: /etc/postgres_exporter
 
 externalDatabase:
   url: ""
