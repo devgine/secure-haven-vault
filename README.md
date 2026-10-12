@@ -163,6 +163,18 @@ Renseignez `DATABASE_URL`. Aucun script à appliquer : l'application crée et mi
    - activez ou désactivez les inscriptions publiques,
    - consultez les logs d'audit.
 
+**Mot de passe administrateur perdu ?** Régénérez-le depuis l'environnement de l'application ; le nouveau mot de passe s'affiche une seule fois :
+
+```bash
+# Développement (Compose)
+task admin:reset-password
+
+# Production (Kubernetes)
+kubectl -n secure-haven-vault exec deploy/secure-haven-vault -- node /app/bin/reset-admin-password.mjs
+```
+
+La commande vise le compte `ADMIN_EMAIL` (ou l'adresse passée en argument), le débloque, le rétablit `SUPER_ADMIN`, ferme ses sessions et trace l'opération au journal d'audit.
+
 > Les coffres personnels ne sont pas listés dans l'administration et ne peuvent pas être désactivés. Seuls les workspaces d'équipe peuvent être activés/désactivés par le SUPER_ADMIN.
 
 > Supprimer un compte ne supprime jamais un coffre d'équipe : sa propriété passe à un autre propriétaire du coffre. S'il n'y en a pas, la suppression est refusée jusqu'à ce qu'un autre propriétaire soit nommé.

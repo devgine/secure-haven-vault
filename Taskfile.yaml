@@ -95,6 +95,11 @@ tasks:
     cmds:
       - docker compose exec app sh
 
+  admin:reset-password:
+    desc: Régénère le mot de passe du compte ADMIN_EMAIL (task admin:reset-password -- autre@exemple.com)
+    cmds:
+      - docker compose exec -T app bun scripts/reset-admin-password.ts {{.CLI_ARGS}}
+
   # ── Base de données ────────────────────────────────────────────────────────
   db:psql:
     desc: Ouvre psql sur la base de développement

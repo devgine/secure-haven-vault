@@ -23,6 +23,9 @@ FROM deps AS build
 COPY srv/ .
 ENV NITRO_PRESET=node-server
 RUN bun run build
+# Commande de secours autonome (voir srv/scripts/reset-admin-password.ts).
+RUN bun build scripts/reset-admin-password.ts --target=node \
+      --outfile=/app/bin/reset-admin-password.mjs
 
 # ── Étape 3 : runtime minimal (non-root, application en lecture seule) ───────
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS runtime
@@ -41,6 +44,7 @@ RUN rm -rf /usr/local/lib/node_modules /opt/yarn-* \
 
 # Fichiers possédés par root : le processus applicatif ne peut pas les modifier.
 COPY --from=build /app/.output ./.output
+COPY --from=build /app/bin ./bin
 USER $UID
 EXPOSE 3000
 # wget est fourni par BusyBox dans l'image Alpine.

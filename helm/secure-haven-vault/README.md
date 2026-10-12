@@ -133,6 +133,21 @@ Each pod, before serving traffic (the readiness and startup probes wait for it):
 3. grants the metrics role access to its single view;
 4. re-wraps data keys after a master key rotation.
 
+## Lost administrator password
+
+Regenerate it from inside a running pod; the new password is printed once:
+
+```bash
+kubectl -n secure-haven-vault exec deploy/secure-haven-vault -- \
+  node /app/bin/reset-admin-password.mjs
+```
+
+It targets `config.admin.email` (pass another address as an argument to
+override). The account is also unbanned, restored as SUPER_ADMIN (created if
+missing), its sessions are closed, and the operation is written to the audit
+log. Anyone allowed to `exec` into the pod can run it: restrict that RBAC
+permission accordingly.
+
 ## Master key
 
 Back up `master-encryption-key` separately: without it, stored secrets cannot
