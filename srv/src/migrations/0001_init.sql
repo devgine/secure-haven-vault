@@ -1,11 +1,12 @@
 -- ─────────────────────────────────────────────────────────────────────────────
--- Sentinel Vault — schéma PostgreSQL complet (auto-hébergé, sans Supabase)
+-- Sentinel Vault — schéma PostgreSQL initial
 --
--- Appliqué automatiquement au premier démarrage du service `db` de compose.yaml
--- (docker-entrypoint-initdb.d), ou manuellement sur n'importe quel PostgreSQL :
---   psql "$DATABASE_URL" -f db/init.sql
+-- Appliqué automatiquement par l'application au démarrage (voir
+-- src/lib/migrate.server.ts) : chaque fichier de ce dossier est exécuté une
+-- seule fois, dans l'ordre, et tracé dans public.schema_migrations.
 --
--- Le script est ré-exécutable (IF NOT EXISTS / duplicate_object tolérés).
+-- Ce premier script reste idempotent (IF NOT EXISTS / duplicate_object
+-- tolérés) car il a pu être appliqué par l'ancien mécanisme d'initialisation.
 -- La sécurité d'accès n'est PAS portée par la base (pas de RLS) : toutes les
 -- requêtes passent par les fonctions serveur de l'application, qui vérifient
 -- l'authentification (session) et les permissions (rôles) avant chaque accès.
@@ -21,7 +22,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 CREATE OR REPLACE FUNCTION public.set_updated_at() RETURNS TRIGGER AS $$
 BEGIN NEW.updated_at = now(); RETURN NEW; END; $$ LANGUAGE plpgsql SET search_path = public;
 
--- ── Comptes applicatifs (remplace l'ancien auth.users) ───────────────────────
+-- ── Comptes applicatifs ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   email text NOT NULL,
@@ -321,15 +322,3 @@ WITH ranked AS (
 )
 UPDATE public.secrets s SET position = ranked.rn
 FROM ranked WHERE ranked.id = s.id AND s.position = 0 AND ranked.rn <> 0;
-
--- Create exporter user for metrics generation
-CREATE USER exporter WITH PASSWORD 'strong-password';
-
-GRANT CONNECT ON DATABASE vault TO exporter;
-
-GRANT USAGE ON SCHEMA public TO exporter;
-
-GRANT SELECT ON TABLE secrets TO exporter;
-
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-GRANT SELECT ON TABLES TO exporter;

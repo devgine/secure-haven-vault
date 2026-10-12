@@ -1,19 +1,20 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Sentinel Vault — stack de production auto-hébergée
+# Sentinel Vault — stack de DÉVELOPPEMENT locale (derrière Traefik)
 #
-#   cp .env.docker.example .env   # puis renseignez les valeurs
-#   docker compose up -d --build
+#   docker compose --env-file .env --env-file .env.local up -d --build
+#
+# .env porte les valeurs par défaut versionnées ; .env.local (non versionné)
+# porte les secrets. Ce fichier n'est PAS une cible de production : l'image
+# `dev` exécute le serveur Vite sur les sources montées. La production se
+# déploie avec le chart Helm (helm/secure-haven-vault) et l'image `runtime`.
 #
 # Architecture :
-#   app → application Sentinel Vault (SSR + API), port 3000
-#   db  → PostgreSQL 17 (volume persistant + healthcheck)
+#   app      → serveur de développement (rechargement à chaud), port 8080
+#   db       → PostgreSQL 18 (volume persistant + healthcheck)
+#   exporter → métriques PostgreSQL, joignables en local uniquement
 #
-# L'application dialogue DIRECTEMENT avec PostgreSQL (plus de couche Supabase) :
-# authentification par sessions maison (cookie httpOnly), schéma appliqué au
-# premier démarrage via db/init.sql (monté dans docker-entrypoint-initdb.d).
+# Le schéma est créé et migré par l'application elle-même à son démarrage.
 # ─────────────────────────────────────────────────────────────────────────────
-
-name: sentinel-vault
 
 services:
   app:
@@ -21,16 +22,28 @@ services:
     build:
       context: .
       target: dev
-    image: sentinel-vault:latest
+    image: sentinel-vault:dev
     restart: unless-stopped
     environment:
-      # Connexion PostgreSQL directe. Par défaut : le service `db` du compose.
-      # Renseignez DATABASE_URL dans .env pour viser un PostgreSQL externe.
-      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-vault}:${POSTGRES_PASSWORD:?renseignez POSTGRES_PASSWORD dans .env}@db:5432/${POSTGRES_DB:-vault}}
+      # Connexion par variables PG* : pas d'URL, donc pas d'encodage à prévoir
+      # pour le mot de passe. DATABASE_URL (si renseignée) vise une base externe.
+      DATABASE_URL: ${DATABASE_URL:-}
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: ${POSTGRES_DB:-vault}
+      PGUSER: ${POSTGRES_USER:-vault}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?renseignez POSTGRES_PASSWORD}
       # Clé maître de chiffrement AES-256-GCM : openssl rand -hex 32
-      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY}
-      PORT: "3000"
-      HOST: "0.0.0.0"
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?renseignez MASTER_ENCRYPTION_KEY dans .env.local}
+      # Compte SUPER_ADMIN créé au premier démarrage (aucun compte ne devient
+      # administrateur par simple inscription).
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # URL publique : sert au cookie Secure et aux redirections OIDC.
+      APP_URL: https://${APP_DOMAIN}
+      # L'application n'est joignable qu'à travers Traefik.
+      TRUST_PROXY: "true"
+      METRICS_DB_ROLE: ${POSTGRES_EXPORTER_USER:-exporter}
     depends_on:
       db:
         condition: service_healthy
@@ -59,12 +72,14 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-vault}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?renseignez POSTGRES_PASSWORD dans .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?renseignez POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-vault}
+      POSTGRES_EXPORTER_USER: ${POSTGRES_EXPORTER_USER:-exporter}
+      POSTGRES_EXPORTER_PASSWORD: ${POSTGRES_EXPORTER_PASSWORD:?renseignez POSTGRES_EXPORTER_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql
-      # Schéma appliqué automatiquement au premier démarrage (base vierge)
-      - ./helm/secure-haven-vault/files/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      # Rôle de métriques, créé au premier démarrage (base vierge) uniquement.
+      - ./.docker/postgres/10-metrics-role.sh:/docker-entrypoint-initdb.d/10-metrics-role.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -76,26 +91,25 @@ services:
 
   exporter:
     container_name: ${PROJECT_NAME}_exporter
-    image: prometheuscommunity/postgres-exporter:latest
+    image: prometheuscommunity/postgres-exporter:v0.17.1
     restart: unless-stopped
     environment:
       PG_EXPORTER_EXTEND_QUERY_PATH: /etc/postgres_exporter/queries.yaml
-      DATA_SOURCE_NAME: ${DATABASE_URL:-postgres://${POSTGRES_EXPORTER_USER:-exporter}:${POSTGRES_EXPORTER_PASSWORD:?renseignez POSTGRES_EXPORTER_PASSWORD dans .env}@db:5432/${POSTGRES_DB:-vault}}
+      # Identifiants séparés de l'URI : jamais ceux de l'application.
+      DATA_SOURCE_URI: db:5432/${POSTGRES_DB:-vault}?sslmode=disable
+      DATA_SOURCE_USER: ${POSTGRES_EXPORTER_USER:-exporter}
+      DATA_SOURCE_PASS: ${POSTGRES_EXPORTER_PASSWORD:?renseignez POSTGRES_EXPORTER_PASSWORD}
     depends_on:
       db:
         condition: service_healthy
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=${TRAEFIK_NETWORK}
-      - traefik.http.routers.${PROJECT_NAME}-exporter.rule=Host(`${APP_DOMAIN}`) && Path('/metrics')
-      - traefik.http.routers.${PROJECT_NAME}-exporter.entrypoints=websecure
-      - traefik.http.routers.${PROJECT_NAME}-exporter.tls=true
-      - traefik.http.services.${PROJECT_NAME}-exporter.loadbalancer.server.port=9187
+    # Métriques consultables depuis la machine locale seulement
+    # (http://127.0.0.1:9187/metrics) — jamais publiées par Traefik.
+    ports:
+      - "127.0.0.1:9187:9187"
     volumes:
-      - ./.docker/exporter/queries.yaml:/etc/postgres_exporter/queries.yaml
+      - ./.docker/exporter/queries.yaml:/etc/postgres_exporter/queries.yaml:ro
     networks:
       - internal
-      - traefik-network
 
 volumes:
   pgdata:

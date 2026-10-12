@@ -1,0 +1,11 @@
+# Maintient à jour les éléments épinglés par digest ou par SHA de commit.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

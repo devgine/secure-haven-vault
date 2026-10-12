@@ -1,18 +1,19 @@
 ---
+# Lit uniquement la vue public.secret_expiry_metrics : identifiants techniques
+# et jours restants (négatif = expiré), jamais le nom ni le contenu d'un secret.
 secret_expiry:
   query: |
-    SELECT
-      name,
-      EXTRACT(
-        EPOCH FROM (expires_at - now())
-      ) / 86400 AS days_remaining
-    FROM secrets
-    WHERE expires_at > now()
+    SELECT secret_id::text AS secret_id,
+           workspace_id::text AS workspace_id,
+           days_remaining
+    FROM public.secret_expiry_metrics
   metrics:
-    - name:
+    - secret_id:
         usage: LABEL
-        description: Secret name
-
+        description: Secret identifier
+    - workspace_id:
+        usage: LABEL
+        description: Workspace identifier
     - days_remaining:
         usage: GAUGE
-        description: Days before expiration
+        description: Days before expiration (negative once expired)

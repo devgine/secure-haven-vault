@@ -146,3 +146,48 @@ export function defaultRootFolderName(date = new Date()): string {
   const d = date.toISOString().slice(0, 10);
   return `Import KeePass — ${d}`;
 }
+
+const attachmentChars = (item: ImportItemPayload) =>
+  item.attachments.reduce((n, a) => n + a.dataB64.length, 0);
+
+/**
+ * Découpe les entrées en lots bornés en nombre ET en volume de pièces jointes,
+ * pour qu'aucune requête ne dépasse ce que le serveur accepte. Une entrée dont
+ * les pièces jointes dépassent à elles seules le plafond est importée sans
+ * celles qui ne tiennent pas (signalé dans les avertissements).
+ */
+export function planImportBatches(
+  items: ImportItemPayload[],
+  maxItems: number,
+  maxAttachmentChars: number,
+): { batches: ImportItemPayload[][]; warnings: string[] } {
+  const batches: ImportItemPayload[][] = [];
+  const warnings: string[] = [];
+  let current: ImportItemPayload[] = [];
+  let currentChars = 0;
+  for (const original of items) {
+    let item = original;
+    if (attachmentChars(item) > maxAttachmentChars) {
+      let used = 0;
+      const kept = item.attachments.filter((a) => {
+        if (used + a.dataB64.length > maxAttachmentChars) return false;
+        used += a.dataB64.length;
+        return true;
+      });
+      warnings.push(
+        `« ${item.name} » : ${item.attachments.length - kept.length} pièce(s) jointe(s) non importée(s) (volume total trop important).`,
+      );
+      item = { ...item, attachments: kept };
+    }
+    const chars = attachmentChars(item);
+    if (current.length > 0 && (current.length >= maxItems || currentChars + chars > maxAttachmentChars)) {
+      batches.push(current);
+      current = [];
+      currentChars = 0;
+    }
+    current.push(item);
+    currentChars += chars;
+  }
+  if (current.length > 0) batches.push(current);
+  return { batches, warnings };
+}

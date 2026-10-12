@@ -50,6 +50,8 @@ import {
   DUPLICATE_CRITERION_LABELS,
   DUPLICATE_STRATEGY_LABELS,
   LARGE_FILE_WARNING_SIZE,
+  MAX_IMPORT_BATCH_ATTACHMENT_CHARS,
+  MAX_IMPORT_BATCH_ITEMS,
   MAX_KEEPASS_TOTAL_IMPORT_SIZE,
   MAX_UNLOCK_ATTEMPTS,
   formatBytes,
@@ -57,7 +59,11 @@ import {
   type DuplicateStrategy,
   type KeepassParseResult,
 } from "@/lib/keepass/types";
-import { defaultRootFolderName, mapEntryToPayload } from "@/lib/keepass/mapping";
+import {
+  defaultRootFolderName,
+  mapEntryToPayload,
+  planImportBatches,
+} from "@/lib/keepass/mapping";
 import {
   finishImportJob,
   importBatch,
@@ -279,9 +285,14 @@ export function KeepassImportDialog({ open, onOpenChange, workspaceId, onImporte
         folders: 0,
         warnings,
       };
-      const size = 25;
-      for (let i = 0; i < payloads.length; i += size) {
-        const chunk = payloads.slice(i, i + size);
+      const plan = planImportBatches(
+        payloads,
+        MAX_IMPORT_BATCH_ITEMS,
+        MAX_IMPORT_BATCH_ATTACHMENT_CHARS,
+      );
+      totals.warnings.push(...plan.warnings);
+      let done = 0;
+      for (const chunk of plan.batches) {
         const res = await importBatch({
           data: { jobId: job.jobId, strategy, criteria, items: chunk },
         });
@@ -293,7 +304,8 @@ export function KeepassImportDialog({ open, onOpenChange, workspaceId, onImporte
         totals.attachments += res.attachments;
         totals.folders += res.folders;
         totals.warnings.push(...res.warnings);
-        setProgress(Math.round(((i + chunk.length) / payloads.length) * 100));
+        done += chunk.length;
+        setProgress(Math.round((done / payloads.length) * 100));
       }
       await finishImportJob({ data: { jobId: job.jobId, status: "completed" } });
       setReport(totals);

@@ -8,6 +8,7 @@ import { audit } from "./audit.server";
 import { requireWorkspacePermission } from "./vault.server";
 import { ensureRootFolder, runImportBatch } from "./import.server";
 import type { ImportItemPayload } from "./keepass/mapping";
+import { MAX_IMPORT_BATCH_ATTACHMENT_CHARS } from "./keepass/types";
 
 const criterion = z.enum(["name", "username", "url", "folder"]);
 const strategy = z.enum(["skip", "copy", "replace", "merge"]);
@@ -136,7 +137,21 @@ export const importBatch = createServerFn({ method: "POST" })
         jobId: z.string().uuid(),
         strategy,
         criteria: z.array(criterion).min(1).max(4),
-        items: z.array(itemSchema).min(1).max(50),
+        items: z
+          .array(itemSchema)
+          .min(1)
+          .max(50)
+          // Le navigateur découpe ses lots sous ce plafond (planImportBatches) ;
+          // server.ts refuse en amont tout corps de requête trop gros.
+          .refine(
+            (items) =>
+              items.reduce(
+                (total, item) =>
+                  total + item.attachments.reduce((n, a) => n + a.dataB64.length, 0),
+                0,
+              ) <= MAX_IMPORT_BATCH_ATTACHMENT_CHARS,
+            "Lot trop volumineux",
+          ),
       })
       .parse(input),
   )

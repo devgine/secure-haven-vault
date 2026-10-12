@@ -1,0 +1,233 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Sentinel Vault — commandes du projet (https://taskfile.dev)
+#
+#   task            liste les commandes
+#   task up         démarre la stack de développement
+#   task check      typage + lint + tests (ce que fait la CI)
+#
+# Tout passe par Docker : ni Bun, ni Node, ni Helm ne sont requis sur l'hôte.
+# ─────────────────────────────────────────────────────────────────────────────
+version: "3"
+
+env:
+  # Compose ne lit que .env par défaut : .env.local (secrets, non versionné)
+  # est chargé en second et surcharge les valeurs par défaut.
+  COMPOSE_ENV_FILES: .env,.env.local
+
+vars:
+  CHART: helm/secure-haven-vault
+  IMAGE: sentinel-vault
+  HELM_IMAGE: alpine/helm:3.18.6
+  USER_IDS:
+    sh: echo "$(id -u):$(id -g)"
+  # Outils de l'application, exécutés dans l'image de développement (sans
+  # démarrer la base ni dépendre d'une stack déjà lancée).
+  SRV: docker compose run --rm --no-deps -T app
+  # Helm conteneurisé, lancé sous l'utilisateur courant pour que charts/ lui
+  # appartienne.
+  HELM: >-
+    docker run --rm --entrypoint sh -u {{.USER_IDS}} -e HOME=/tmp
+    -v "{{.ROOT_DIR}}/{{.CHART}}":/chart -w /chart {{.HELM_IMAGE}} -c
+  # Valeurs factices suffisantes pour rendre le chart.
+  HELM_CI_VALUES: >-
+    --set-string config.masterEncryptionKey=ci-validation-key
+    --set-string postgresql.auth.password=ci-validation-password
+
+tasks:
+  default:
+    desc: Liste les commandes disponibles
+    silent: true
+    cmds:
+      - task --list
+
+  # ── Stack de développement ─────────────────────────────────────────────────
+  env:
+    desc: Crée .env.local avec des secrets générés s'il n'existe pas
+    status:
+      - test -f .env.local
+    cmds:
+      - |
+        umask 077
+        cat > .env.local <<EOF
+        MASTER_ENCRYPTION_KEY=$(openssl rand -hex 32)
+        POSTGRES_PASSWORD=$(openssl rand -hex 24)
+        POSTGRES_EXPORTER_PASSWORD=$(openssl rand -hex 24)
+        ADMIN_PASSWORD=$(openssl rand -hex 12)
+        EOF
+      - echo ".env.local créé — conservez MASTER_ENCRYPTION_KEY, elle est irremplaçable."
+
+  up:
+    desc: Démarre la stack (app, db, exporter) et reconstruit l'image si besoin
+    deps: [env]
+    cmds:
+      - docker compose up -d --build
+      - docker compose ps
+
+  down:
+    desc: Arrête la stack (les données sont conservées)
+    cmds:
+      - docker compose down
+
+  restart:
+    desc: Redémarre l'application
+    cmds:
+      - docker compose restart app
+
+  ps:
+    desc: État des services
+    cmds:
+      - docker compose ps -a
+
+  logs:
+    desc: Suit les logs (task logs -- db pour un autre service)
+    cmds:
+      - docker compose logs -f {{.CLI_ARGS | default "app"}}
+
+  config:
+    desc: Vérifie compose.yaml et les variables d'environnement
+    cmds:
+      - docker compose config --quiet
+      - echo "compose.yaml valide"
+
+  shell:
+    desc: Ouvre un shell dans le conteneur de l'application
+    interactive: true
+    cmds:
+      - docker compose exec app sh
+
+  # ── Base de données ────────────────────────────────────────────────────────
+  db:psql:
+    desc: Ouvre psql sur la base de développement
+    interactive: true
+    cmds:
+      - docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+
+  db:backup:
+    desc: Sauvegarde la base dans backups/ (format pg_dump -Fc)
+    cmds:
+      - mkdir -p backups
+      - docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" -Fc "$POSTGRES_DB"' > backups/vault-{{now | date "2006-01-02-150405"}}.dump
+      - ls -lh backups | tail -1
+
+  db:restore:
+    desc: Restaure une sauvegarde (task db:restore -- backups/fichier.dump)
+    prompt: Écraser la base de développement avec {{.CLI_ARGS}} ?
+    preconditions:
+      - sh: test -f "{{.CLI_ARGS}}"
+        msg: "Indiquez un fichier existant : task db:restore -- backups/fichier.dump"
+    cmds:
+      - docker compose exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists' < "{{.CLI_ARGS}}"
+
+  db:reset:
+    desc: Supprime la base de développement (volume pgdata) et arrête la stack
+    prompt: Supprimer définitivement la base de développement ?
+    cmds:
+      - docker compose down -v
+
+  # ── Qualité (identique à la CI) ────────────────────────────────────────────
+  typecheck:
+    desc: Vérifie les types TypeScript
+    cmds:
+      - "{{.SRV}} bunx tsc --noEmit"
+
+  lint:
+    desc: Lance ESLint
+    cmds:
+      - "{{.SRV}} bun run lint"
+
+  lint:fix:
+    desc: Corrige automatiquement ce qu'ESLint sait corriger
+    cmds:
+      - "{{.SRV}} bun run lint:fix"
+
+  format:
+    desc: Formate le code avec Prettier
+    cmds:
+      - "{{.SRV}} bun run format"
+
+  test:
+    desc: Lance les tests unitaires (task test -- chemin/du/test pour filtrer)
+    cmds:
+      - "{{.SRV}} bunx vitest run {{.CLI_ARGS}}"
+
+  check:
+    desc: Typage + lint + tests
+    cmds:
+      - task: typecheck
+      - task: lint
+      - task: test
+
+  test:e2e:
+    desc: Tests e2e serveur (dossiers, import, ordre) contre la base de développement
+    deps: [up]
+    cmds:
+      - for: [folders, import, ordering]
+        cmd: docker compose exec -T app bun scripts/{{.ITEM}}-e2e.ts
+
+  # ── Image de production ────────────────────────────────────────────────────
+  image:build:
+    desc: Construit l'image de production (cible runtime)
+    cmds:
+      - docker build --target runtime -t {{.IMAGE}}:local .
+
+  image:scan:
+    desc: Analyse l'image de production avec Trivy (même seuil que la CI)
+    deps: [image:build]
+    cmds:
+      - >-
+        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
+        aquasec/trivy:latest image --quiet --scanners vuln
+        --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 {{.IMAGE}}:local
+
+  # ── Chart Helm ─────────────────────────────────────────────────────────────
+  helm:deps:
+    desc: Télécharge les dépendances du chart (selon Chart.lock)
+    sources:
+      - "{{.CHART}}/Chart.yaml"
+      - "{{.CHART}}/Chart.lock"
+    generates:
+      - "{{.CHART}}/charts/*.tgz"
+    cmds:
+      - >-
+        {{.HELM}} 'helm repo add prometheus-community
+        https://prometheus-community.github.io/helm-charts >/dev/null
+        && helm dependency build .'
+
+  helm:lint:
+    desc: Lint du chart
+    deps: [helm:deps]
+    cmds:
+      - "{{.HELM}} 'helm lint . {{.HELM_CI_VALUES}}'"
+
+  helm:template:
+    desc: Affiche les manifestes rendus (task helm:template -- --set ingress.enabled=true)
+    deps: [helm:deps]
+    cmds:
+      - "{{.HELM}} 'helm template secure-haven-vault . {{.HELM_CI_VALUES}} {{.CLI_ARGS}}'"
+
+  helm:validate:
+    desc: Valide les manifestes rendus contre les schémas Kubernetes et CloudNativePG
+    deps: [helm:deps]
+    cmds:
+      - >-
+        {{.HELM}} 'helm template secure-haven-vault . {{.HELM_CI_VALUES}}
+        --set prometheus-postgres-exporter.enabled=true
+        --set-string postgresql.metricsRole.password=ci'
+        | docker run --rm -i ghcr.io/yannh/kubeconform:latest -summary -strict
+        -schema-location default
+        -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{"{{"}}.Group{{"}}"}}/{{"{{"}}.ResourceKind{{"}}"}}_{{"{{"}}.ResourceAPIVersion{{"}}"}}.json'
+        -
+
+  helm:check:
+    desc: Lint + validation du chart
+    cmds:
+      - task: helm:lint
+      - task: helm:validate
+
+  # ── Tout vérifier avant de pousser ─────────────────────────────────────────
+  ci:
+    desc: Rejoue localement les contrôles de la CI (application, image, chart)
+    cmds:
+      - task: check
+      - task: image:scan
+      - task: helm:check

@@ -8,6 +8,7 @@ import {
   EyeOff,
   History,
   Pencil,
+  RotateCcw,
   Star,
   Trash2,
 } from "lucide-react";
@@ -30,6 +31,7 @@ import {
   deleteSecret,
   getSecret,
   getSecretVersions,
+  restoreSecretVersion,
   revealSecret,
   toggleFavorite,
 } from "@/lib/vault.functions";
@@ -38,6 +40,16 @@ import type { WorkspaceRole } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 
 const MASK = "••••••••••";
+
+const VERSION_ACTION_LABELS: Record<string, string> = {
+  created: "Création",
+  updated: "Modification",
+  restored: "Restauration",
+  baseline: "État initial",
+  "import.created": "Import",
+  "import.merge": "Fusion (import)",
+  "import.replaced": "Remplacé (import)",
+};
 
 function ExpiryBanner({ expiresAt }: { expiresAt: string }) {
   const days = Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 86_400_000);
@@ -79,6 +91,30 @@ export function SecretDetailDialog({
   const revealFn = useServerFn(revealSecret);
   const favoriteFn = useServerFn(toggleFavorite);
   const deleteFn = useServerFn(deleteSecret);
+  const restoreFn = useServerFn(restoreSecretVersion);
+  const [restoring, setRestoring] = useState<string | null>(null);
+
+  const restoreVersion = async (versionId: string, version: number) => {
+    if (!secretId) return;
+    if (!window.confirm(`Restaurer ce secret tel qu'il était en v${version} ? L'état actuel restera dans l'historique.`)) {
+      return;
+    }
+    setRestoring(versionId);
+    try {
+      await restoreFn({ data: { secretId, versionId } });
+      setRevealed(new Map());
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["secret", secretId] }),
+        queryClient.invalidateQueries({ queryKey: ["secret-versions", secretId] }),
+        queryClient.invalidateQueries({ queryKey: ["secrets"] }),
+      ]);
+      toast.success(`Version v${version} restaurée`);
+    } catch (err) {
+      toast.error((err as Error).message || "Restauration impossible");
+    } finally {
+      setRestoring(null);
+    }
+  };
 
   const { data: folderData } = useQuery({
     queryKey: ["folders", workspaceId],
@@ -215,9 +251,15 @@ export function SecretDetailDialog({
                     {secret.url && (
                       <div>
                         <div className="text-xs text-muted-foreground">URL</div>
-                        <a href={secret.url} target="_blank" rel="noreferrer" className="secret-value text-primary hover:underline">
-                          {secret.url}
-                        </a>
+                        {/* Seules les URL http(s) deviennent cliquables : une valeur
+                            importée peut contenir n'importe quel schéma. */}
+                        {/^https?:\/\//i.test(secret.url) ? (
+                          <a href={secret.url} target="_blank" rel="noopener noreferrer" className="secret-value text-primary hover:underline">
+                            {secret.url}
+                          </a>
+                        ) : (
+                          <div className="secret-value">{secret.url}</div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -316,20 +358,35 @@ export function SecretDetailDialog({
                   <p className="text-sm text-muted-foreground">Aucun historique.</p>
                 ) : (
                   <div className="space-y-2">
-                    {versions.map((v) => (
-                      <div key={v.id} className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm">
+                    {versions.map((v, index) => (
+                      <div key={v.id} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm">
                         <div className="flex items-center gap-2">
                           <Badge variant="secondary">v{v.version}</Badge>
-                          <span className="capitalize">{v.action === "created" ? "Création" : "Modification"}</span>
+                          <span>{VERSION_ACTION_LABELS[v.action] ?? "Modification"}</span>
                           {v.changedFields.length > 0 && (
                             <span className="text-xs text-muted-foreground">
                               ({v.changedFields.join(", ")})
                             </span>
                           )}
                         </div>
-                        <div className="text-right text-xs text-muted-foreground">
-                          <div>{v.changedByEmail ?? "—"}</div>
-                          <div>{new Date(v.changedAt).toLocaleString("fr-FR")}</div>
+                        <div className="flex items-center gap-3">
+                          <div className="text-right text-xs text-muted-foreground">
+                            <div>{v.changedByEmail ?? "—"}</div>
+                            <div>{new Date(v.changedAt).toLocaleString("fr-FR")}</div>
+                          </div>
+                          {/* La version la plus récente est l'état courant : rien à restaurer. */}
+                          {canUpdate && v.restorable && index > 0 && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={restoring !== null}
+                              onClick={() => void restoreVersion(v.id, v.version)}
+                              title="Restaurer cette version (tracé au journal)"
+                            >
+                              <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                              {restoring === v.id ? "Restauration…" : "Restaurer"}
+                            </Button>
+                          )}
                         </div>
                       </div>
                     ))}

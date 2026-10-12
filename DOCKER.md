@@ -1,79 +1,79 @@
-# Déploiement Docker — Sentinel Vault
+# Docker — Sentinel Vault
 
-Ce document décrit le build et l'exécution de Sentinel Vault en conteneurs :
-`Dockerfile` (image tout-en-un) + `compose.yaml` (application + PostgreSQL).
+Deux usages distincts :
 
-L'application est **entièrement auto-hébergée** : elle dialogue directement avec
-PostgreSQL (driver `postgres.js`), sans aucune couche Supabase. L'authentification
-est maison (email/mot de passe haché en scrypt, sessions opaques en cookie
-httpOnly) et le SSO OIDC (Keycloak etc.) est implémenté en flux authorization-code
-standard.
+- **Développement** : `compose.yaml` (serveur Vite avec rechargement à chaud,
+  PostgreSQL, exporter de métriques), derrière Traefik.
+- **Production** : l'image `runtime` du `Dockerfile`, déployée sur Kubernetes
+  par le chart Helm ([helm/secure-haven-vault](helm/secure-haven-vault/README.md)).
 
-## Démarrage rapide
+L'application est entièrement auto-hébergée : elle dialogue directement avec
+PostgreSQL (driver `postgres.js`), l'authentification est maison (mots de passe
+hachés en scrypt, sessions opaques en cookie httpOnly) et le SSO OIDC suit le
+flux authorization-code standard (PKCE + nonce).
+
+## Développement avec Compose
 
 ```bash
-cp .env.docker.example .env
-# Éditez .env : MASTER_ENCRYPTION_KEY (openssl rand -hex 32), POSTGRES_PASSWORD
-
-docker compose up -d --build
-docker compose ps          # les deux services doivent être "healthy"
+# .env : valeurs par défaut versionnées, sans secret.
+# .env.local (non versionné) : MASTER_ENCRYPTION_KEY, POSTGRES_PASSWORD,
+#                              POSTGRES_EXPORTER_PASSWORD, ADMIN_PASSWORD
+docker compose --env-file .env --env-file .env.local up -d --build
+docker compose ps
 ```
 
-L'application écoute sur `http://localhost:3000`.
+L'application répond sur `https://<APP_DOMAIN>` via Traefik (réseau externe
+`TRAEFIK_NETWORK`). Les métriques PostgreSQL ne sont jamais publiées par
+Traefik : elles sont consultables sur `http://127.0.0.1:9187/metrics`.
 
-Au premier démarrage du service `db` (base vierge), le schéma complet de
-`db/init.sql` est appliqué automatiquement (répertoire
-`docker-entrypoint-initdb.d`). Le **premier compte créé** via la page de
-connexion devient SUPER_ADMIN ; chaque compte reçoit son coffre personnel.
+Au démarrage, l'application :
 
-- **Image multi-étapes** : installation (Bun) → build de production → runtime
-  Node 22 Alpine non-root, sans le code source ni les devDependencies.
-- **Healthchecks** : `GET /api/public/health` (liveness, intégré au Dockerfile)
-  et `GET /api/public/ready` (readiness — vérifie aussi la joignabilité de
-  PostgreSQL, utile pour un orchestrateur).
-- **Persistance** : volume nommé `pgdata` pour PostgreSQL.
+1. applique les migrations de schéma (`srv/src/migrations`, tracées dans
+   `schema_migrations`) ;
+2. crée le compte `SUPER_ADMIN` à partir de `ADMIN_EMAIL` / `ADMIN_PASSWORD`
+   tant que la plateforme n'en a pas ;
+3. accorde au rôle de métriques la lecture de sa seule vue
+   (`secret_expiry_metrics` : identifiants et jours restants, sans nom de secret).
+
+Le rôle de métriques est créé au **premier** démarrage de la base par
+`.docker/postgres/10-metrics-role.sh`. Sur un volume `pgdata` existant, créez-le
+(ou changez son mot de passe) à la main :
+
+```bash
+docker compose exec db psql -U vault -d vault \
+  -c "ALTER ROLE exporter PASSWORD '<POSTGRES_EXPORTER_PASSWORD>'"
+```
+
+> Les bases initialisées avant cette version portent un rôle `exporter` dont le
+> mot de passe (`strong-password`) figurait dans le dépôt : changez-le avec la
+> commande ci-dessus.
+
+## Image de production
+
+```bash
+docker build --target runtime -t sentinel-vault .
+```
+
+- **Multi-étapes** : installation (Bun) → build → runtime Node 22 Alpine, sans
+  le code source, les devDependencies, ni npm.
+- **Non-root, lecture seule** : le processus tourne sous l'UID 10005 et ne peut
+  pas modifier les fichiers de l'application ; compatible avec un système de
+  fichiers racine en lecture seule (seul `/tmp` doit être inscriptible).
+- **Images de base épinglées par digest** ; Dependabot propose les mises à jour.
+- **Sondes** : `GET /api/public/health` (vivacité, sans dépendance) et
+  `GET /api/public/ready` (disponibilité : migrations appliquées et PostgreSQL
+  joignable).
+- **Arrêt propre** : sur `SIGTERM`, le serveur HTTP et le pool PostgreSQL sont
+  fermés ; le conteneur s'arrête en une à deux secondes.
 
 ## Variables d'environnement
 
-| Variable | Quand | Rôle |
-|---|---|---|
-| `DATABASE_URL` | runtime | Chaîne de connexion PostgreSQL. Par défaut, le compose la construit vers le service `db` ; renseignez-la dans `.env` pour viser un PostgreSQL externe. |
-| `MASTER_ENCRYPTION_KEY` | runtime | Clé maître AES-256-GCM (wrapping des DEK par coffre). **Jamais** dans l'image ni en base. |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | runtime | Base PostgreSQL locale du compose. |
-| `APP_PORT` | runtime | Port exposé sur l'hôte (défaut 3000). |
+Voir le tableau complet dans le [README](README.md#variables-denvironnement).
+Les indispensables : `MASTER_ENCRYPTION_KEY`, la connexion PostgreSQL
+(`DATABASE_URL` ou `PGHOST`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`), `APP_URL`, et
+`ADMIN_EMAIL` / `ADMIN_PASSWORD` au premier démarrage.
 
-## PostgreSQL externe
-
-Pour utiliser une base existante au lieu du service `db` :
-
-1. Appliquez le schéma : `psql "$DATABASE_URL" -f db/init.sql`
-2. Renseignez `DATABASE_URL` dans `.env` (chaîne complète).
-3. Supprimez le service `db` du compose (et le `depends_on` du service `app`).
-
-## Reverse proxy (exemple Caddy)
-
-Ajoutez au compose, ou sur l'hôte devant le port 3000 :
-
-```caddyfile
-vault.example.com {
-    reverse_proxy app:3000
-    encode zstd gzip
-}
-```
-
-Terminez toujours en TLS en production : les valeurs déchiffrées transitent
-entre le serveur et le navigateur lors des actions Reveal/Copy, et le cookie de
-session n'est marqué `Secure` qu'en HTTPS.
-
-## SSO OIDC (Keycloak etc.)
-
-1. Chez votre fournisseur, créez un client « confidential » avec l'URL de rappel :
-   `https://votre-domaine/api/public/oidc/callback`
-2. Dans l'application : Administration → SSO / OIDC, renseignez l'issuer URL,
-   le client ID et le secret client (chiffré sous la clé maître avant stockage).
-3. Configurez éventuellement le mapping groupes IdP → coffres (claim `groups`).
-
-## Sauvegarde / restauration
+## Sauvegarde / restauration (Compose)
 
 ```bash
 # Sauvegarde

@@ -70,7 +70,7 @@ import {
   listWorkspaces,
   updateWorkspace,
 } from "@/lib/vault.functions";
-import { ROLE_LABELS, type WorkspaceRole } from "@/lib/permissions";
+import { ROLE_LABELS, assignableRoles, roleAtLeast, type WorkspaceRole } from "@/lib/permissions";
 import type { FolderDto, SecretDetail, SecretListItem } from "@/lib/types";
 
 interface WorkspaceSearch {
@@ -96,10 +96,12 @@ function AddMemberDialog({
   open,
   onOpenChange,
   workspaceId,
+  actorRole,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   workspaceId: string;
+  actorRole: WorkspaceRole | null;
 }) {
   const queryClient = useQueryClient();
   const addFn = useServerFn(addMember);
@@ -142,7 +144,7 @@ function AddMemberDialog({
             <Select value={role} onValueChange={(v) => setRole(v as WorkspaceRole)}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
-                {(Object.keys(ROLE_LABELS) as WorkspaceRole[]).map((r) => (
+                {assignableRoles(actorRole).map((r) => (
                   <SelectItem key={r} value={r}>{ROLE_LABELS[r]}</SelectItem>
                 ))}
               </SelectContent>
@@ -552,7 +554,7 @@ function WorkspacePage() {
                     <div className="truncate text-xs text-muted-foreground">{m.email}</div>
                   </div>
                   {m.managedByOidc && <Badge variant="outline" className="text-[10px]">via SSO</Badge>}
-                  {canManageMembers && !m.managedByOidc ? (
+                  {canManageMembers && !m.managedByOidc && roleAtLeast(role, m.role) ? (
                     <>
                       <Select
                         value={m.role}
@@ -568,7 +570,7 @@ function WorkspacePage() {
                       >
                         <SelectTrigger className="h-8 w-36"><SelectValue /></SelectTrigger>
                         <SelectContent>
-                          {(Object.keys(ROLE_LABELS) as WorkspaceRole[]).map((r) => (
+                          {assignableRoles(role).map((r) => (
                             <SelectItem key={r} value={r}>{ROLE_LABELS[r]}</SelectItem>
                           ))}
                         </SelectContent>
@@ -701,7 +703,7 @@ function WorkspacePage() {
         existing={editing}
         defaultFolderId={selection.kind === "folder" ? selection.id : null}
       />
-      <AddMemberDialog open={addMemberOpen} onOpenChange={setAddMemberOpen} workspaceId={workspaceId} />
+      <AddMemberDialog open={addMemberOpen} onOpenChange={setAddMemberOpen} workspaceId={workspaceId} actorRole={role} />
 
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <DialogContent>

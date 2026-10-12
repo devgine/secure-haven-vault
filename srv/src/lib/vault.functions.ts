@@ -2,9 +2,15 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireAuth } from "./auth-middleware";
 import { getDb, iso, isoOrNull } from "./db.server";
-import { isSuperAdmin, requireWorkspacePermission } from "./vault.server";
-import { decryptField, encryptField } from "./crypto.server";
-import { getOrCreateDek } from "./vault.server";
+import {
+  assertFolderInWorkspace,
+  getOrCreateDek,
+  isSuperAdmin,
+  requireWorkspacePermission,
+  writeSecretFields,
+} from "./vault.server";
+import { decryptField, secretContext } from "./crypto.server";
+import { ensureBaselineSnapshot, loadSnapshot, recordVersion } from "./versions.server";
 import { audit } from "./audit.server";
 import type {
   RevealedField,
@@ -30,7 +36,12 @@ const secretInput = z.object({
   url: z.string().max(2000).optional(),
   description: z.string().max(5000).optional(),
   tags: z.array(z.string().min(1).max(50)).max(30).optional(),
-  expiresAt: z.string().nullable().optional(),
+  expiresAt: z
+    .string()
+    .max(40)
+    .refine((v) => v === "" || !Number.isNaN(Date.parse(v)), "Date d'expiration invalide")
+    .nullable()
+    .optional(),
   notifyBeforeDays: z.number().int().min(1).max(365).nullable().optional(),
   fields: z.array(fieldInput).max(100),
 });
@@ -84,7 +95,7 @@ export const getSessionInfo = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const { userId } = context;
     const sql = getDb();
-    const [profiles, superAdmin] = await Promise.all([
+    const [profiles, superAdmin, accounts] = await Promise.all([
       sql<
         {
           id: string;
@@ -98,6 +109,9 @@ export const getSessionInfo = createServerFn({ method: "GET" })
         FROM profiles WHERE id = ${userId}
       `,
       isSuperAdmin(userId),
+      sql<{ has_password: boolean }[]>`
+        SELECT password_hash IS NOT NULL AS has_password FROM users WHERE id = ${userId}
+      `,
     ]);
     const profile = profiles[0];
     return {
@@ -107,6 +121,8 @@ export const getSessionInfo = createServerFn({ method: "GET" })
       lockTimeoutMinutes: profile?.lock_timeout_minutes ?? 15,
       theme: profile?.theme ?? "system",
       isSuperAdmin: superAdmin,
+      // Faux pour un compte provisionné par le SSO : pas de mot de passe local.
+      hasPassword: accounts[0]?.has_password === true,
     };
   });
 
@@ -383,7 +399,7 @@ export const revealSecret = createServerFn({ method: "POST" })
 
     const revealed: RevealedField[] = [];
     for (const f of fields) {
-      const value = await decryptField(dek, f.ciphertext);
+      const value = await decryptField(dek, f.ciphertext, secretContext(secret.id));
       revealed.push({
         id: f.id,
         label: f.label,
@@ -411,38 +427,33 @@ export const createSecret = createServerFn({ method: "POST" })
     const { userId } = context;
     await requireWorkspacePermission(userId, data.workspaceId, "secret.create");
     const sql = getDb();
-
-    const inserted = await sql<{ id: string }[]>`
-      INSERT INTO secrets (workspace_id, folder_id, position, type, name, username, url, description, tags, expires_at, notify_before_days, created_by, updated_by)
-      VALUES (
-        ${data.workspaceId}, ${data.folderId ?? null},
-        (SELECT coalesce(max(position), -1) + 1 FROM secrets
-          WHERE workspace_id = ${data.workspaceId}
-            AND folder_id IS NOT DISTINCT FROM ${data.folderId ?? null}
-            AND deleted_at IS NULL),
-        ${data.type}, ${data.name},
-        ${data.username || null}, ${data.url || null}, ${data.description || null},
-        ${sql.array(data.tags ?? [])},
-        ${data.expiresAt || null}, ${data.notifyBeforeDays ?? null},
-        ${userId}, ${userId}
-      )
-      RETURNING id
-    `;
-    const secretId = inserted[0]!.id;
-
     const dek = await getOrCreateDek(data.workspaceId);
-    for (let i = 0; i < data.fields.length; i++) {
-      const f = data.fields[i]!;
-      await sql`
-        INSERT INTO secret_fields (secret_id, label, field_type, is_sensitive, ciphertext, position)
-        VALUES (${secretId}, ${f.label}, ${f.fieldType}, ${f.isSensitive}, ${await encryptField(dek, f.value)}, ${i})
-      `;
-    }
 
-    await sql`
-      INSERT INTO secret_versions (secret_id, version, action, changed_by, changed_fields)
-      VALUES (${secretId}, 1, 'created', ${userId}, ${sql.array([] as string[])})
-    `;
+    // Tout ou rien : un secret n'existe jamais sans ses champs.
+    const secretId = await sql.begin(async (tx) => {
+      await assertFolderInWorkspace(tx, data.folderId, data.workspaceId);
+      const inserted = await tx<{ id: string }[]>`
+        INSERT INTO secrets (workspace_id, folder_id, position, type, name, username, url, description, tags, expires_at, notify_before_days, created_by, updated_by)
+        VALUES (
+          ${data.workspaceId}, ${data.folderId ?? null},
+          (SELECT coalesce(max(position), -1) + 1 FROM secrets
+            WHERE workspace_id = ${data.workspaceId}
+              AND folder_id IS NOT DISTINCT FROM ${data.folderId ?? null}
+              AND deleted_at IS NULL),
+          ${data.type}, ${data.name},
+          ${data.username || null}, ${data.url || null}, ${data.description || null},
+          ${tx.array(data.tags ?? [])},
+          ${data.expiresAt || null}, ${data.notifyBeforeDays ?? null},
+          ${userId}, ${userId}
+        )
+        RETURNING id
+      `;
+      const id = inserted[0]!.id;
+      await writeSecretFields(tx, dek, id, data.fields);
+      await recordVersion(tx, dek, id, "created", userId);
+      return id;
+    });
+
     await audit({ userId, workspaceId: data.workspaceId, action: "secret.created", targetType: "secret", targetId: secretId, targetLabel: data.name });
     return { id: secretId };
   });
@@ -462,47 +473,39 @@ export const updateSecret = createServerFn({ method: "POST" })
     const existing = rows[0];
     if (!existing) throw new Error("Not found");
     await requireWorkspacePermission(userId, existing.workspace_id, "secret.update");
-
-    await sql`
-      UPDATE secrets SET
-        folder_id = ${data.folderId ?? null},
-        type = ${data.type},
-        name = ${data.name},
-        username = ${data.username || null},
-        url = ${data.url || null},
-        description = ${data.description || null},
-        tags = ${sql.array(data.tags ?? [])},
-        expires_at = ${data.expiresAt || null},
-        notify_before_days = ${data.notifyBeforeDays ?? null},
-        updated_by = ${userId}
-      WHERE id = ${data.secretId}
-    `;
-
     const dek = await getOrCreateDek(existing.workspace_id);
-    await sql`DELETE FROM secret_fields WHERE secret_id = ${data.secretId}`;
-    for (let i = 0; i < data.fields.length; i++) {
-      const f = data.fields[i]!;
-      await sql`
-        INSERT INTO secret_fields (secret_id, label, field_type, is_sensitive, ciphertext, position)
-        VALUES (${data.secretId}, ${f.label}, ${f.fieldType}, ${f.isSensitive}, ${await encryptField(dek, f.value)}, ${i})
-      `;
-    }
 
-    const lastVersion = await sql<{ version: number }[]>`
-      SELECT version FROM secret_versions
-      WHERE secret_id = ${data.secretId}
-      ORDER BY version DESC LIMIT 1
-    `;
-    await sql`
-      INSERT INTO secret_versions (secret_id, version, action, changed_by, changed_fields)
-      VALUES (
-        ${data.secretId},
-        ${(lastVersion[0]?.version ?? 0) + 1},
-        'updated',
-        ${userId},
-        ${sql.array(["metadata", ...data.fields.map((f) => f.label)])}
-      )
-    `;
+    // Tout ou rien : les anciens champs ne sont supprimés que si les nouveaux
+    // sont écrits. La ligne est verrouillée contre les modifications simultanées.
+    await sql.begin(async (tx) => {
+      const locked = await tx<{ id: string }[]>`
+        SELECT id FROM secrets WHERE id = ${data.secretId} AND deleted_at IS NULL FOR UPDATE
+      `;
+      if (!locked[0]) throw new Error("Not found");
+      await assertFolderInWorkspace(tx, data.folderId, existing.workspace_id);
+      await ensureBaselineSnapshot(tx, dek, data.secretId);
+      await tx`
+        UPDATE secrets SET
+          folder_id = ${data.folderId ?? null},
+          type = ${data.type},
+          name = ${data.name},
+          username = ${data.username || null},
+          url = ${data.url || null},
+          description = ${data.description || null},
+          tags = ${tx.array(data.tags ?? [])},
+          expires_at = ${data.expiresAt || null},
+          notify_before_days = ${data.notifyBeforeDays ?? null},
+          updated_by = ${userId}
+        WHERE id = ${data.secretId}
+      `;
+      await tx`DELETE FROM secret_fields WHERE secret_id = ${data.secretId}`;
+      await writeSecretFields(tx, dek, data.secretId, data.fields);
+      await recordVersion(tx, dek, data.secretId, "updated", userId, [
+        "metadata",
+        ...data.fields.map((f) => f.label),
+      ]);
+    });
+
     await audit({ userId, workspaceId: existing.workspace_id, action: "secret.updated", targetType: "secret", targetId: data.secretId, targetLabel: data.name });
     return { ok: true };
   });
@@ -578,14 +581,15 @@ export const getSecretVersions = createServerFn({ method: "GET" })
         changed_at: Date | string;
         changed_by: string | null;
         changed_by_email: string | null;
+        restorable: boolean;
       }[]
     >`
       SELECT v.id, v.version, v.action, v.changed_fields, v.changed_at, v.changed_by,
-             p.email AS changed_by_email
+             p.email AS changed_by_email, v.snapshot IS NOT NULL AS restorable
       FROM secret_versions v
       LEFT JOIN profiles p ON p.id = v.changed_by
       WHERE v.secret_id = ${data.secretId}
-      ORDER BY v.version DESC
+      ORDER BY v.version DESC, v.changed_at DESC
       LIMIT 50
     `;
     const out: SecretVersionDto[] = versions.map((v) => ({
@@ -595,6 +599,80 @@ export const getSecretVersions = createServerFn({ method: "GET" })
       changedByEmail: v.changed_by_email,
       changedFields: v.changed_fields ?? [],
       changedAt: iso(v.changed_at),
+      restorable: v.restorable === true,
     }));
     return out;
+  });
+
+/**
+ * Restaure un secret tel qu'il était à une version donnée. L'état courant
+ * reste dans l'historique : la restauration crée une nouvelle version.
+ */
+export const restoreSecretVersion = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input: unknown) =>
+    z.object({ secretId: z.string().uuid(), versionId: z.string().uuid() }).parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const { userId } = context;
+    const sql = getDb();
+    const rows = await sql<{ id: string; workspace_id: string; name: string }[]>`
+      SELECT id, workspace_id, name FROM secrets
+      WHERE id = ${data.secretId} AND deleted_at IS NULL
+    `;
+    const existing = rows[0];
+    if (!existing) throw new Error("Not found");
+    await requireWorkspacePermission(userId, existing.workspace_id, "secret.update");
+    const dek = await getOrCreateDek(existing.workspace_id);
+
+    const restoredVersion = await sql.begin(async (tx) => {
+      const locked = await tx<{ id: string; folder_id: string | null }[]>`
+        SELECT id, folder_id FROM secrets
+        WHERE id = ${data.secretId} AND deleted_at IS NULL FOR UPDATE
+      `;
+      if (!locked[0]) throw new Error("Not found");
+      const target = await loadSnapshot(tx, dek, data.secretId, data.versionId);
+      if (!target) throw new Error("Cette version ne peut pas être restaurée");
+      await ensureBaselineSnapshot(tx, dek, data.secretId);
+
+      // Le groupe d'origine peut avoir disparu depuis : on garde alors l'actuel.
+      const { snapshot } = target;
+      const folders = snapshot.folderId
+        ? await tx<{ id: string }[]>`
+            SELECT id FROM secret_folders
+            WHERE id = ${snapshot.folderId} AND workspace_id = ${existing.workspace_id}
+              AND deleted_at IS NULL
+          `
+        : [];
+      const folderId = snapshot.folderId === null ? null : (folders[0]?.id ?? locked[0].folder_id);
+
+      await tx`
+        UPDATE secrets SET
+          folder_id = ${folderId},
+          type = ${snapshot.type}::secret_type,
+          name = ${snapshot.name},
+          username = ${snapshot.username},
+          url = ${snapshot.url},
+          description = ${snapshot.description},
+          tags = ${tx.array(snapshot.tags)},
+          expires_at = ${snapshot.expiresAt},
+          notify_before_days = ${snapshot.notifyBeforeDays},
+          updated_by = ${userId}
+        WHERE id = ${data.secretId}
+      `;
+      await tx`DELETE FROM secret_fields WHERE secret_id = ${data.secretId}`;
+      await writeSecretFields(tx, dek, data.secretId, snapshot.fields);
+      await recordVersion(tx, dek, data.secretId, "restored", userId, [`v${target.version}`]);
+      return target.version;
+    });
+
+    await audit({
+      userId,
+      workspaceId: existing.workspace_id,
+      action: "secret.version_restored",
+      targetType: "secret",
+      targetId: existing.id,
+      targetLabel: `${existing.name} → v${restoredVersion}`,
+    });
+    return { ok: true, restoredVersion };
   });

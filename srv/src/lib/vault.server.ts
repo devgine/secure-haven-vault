@@ -1,13 +1,13 @@
 // Server-only helpers for vault authorization and encryption key management.
-// Autorisation applicative (SQL direct) — il n'y a plus de RLS : chaque accès
-// sensible passe par requireWorkspacePermission / requireSuperAdmin.
-import { getDb } from "./db.server";
+// Autorisation applicative (SQL direct, pas de RLS) : chaque accès sensible
+// passe par requireWorkspacePermission / requireSuperAdmin.
+import { getDb, type Tx } from "./db.server";
 import {
   roleHasPermission,
   type Permission,
   type WorkspaceRole,
 } from "./permissions";
-import { generateDek, getKeyProvider } from "./crypto.server";
+import { encryptField, generateDek, getKeyProvider, secretContext } from "./crypto.server";
 
 export async function getWorkspaceRole(
   userId: string,
@@ -75,22 +75,64 @@ export async function getOrCreateDek(workspaceId: string): Promise<Uint8Array> {
     SELECT wrapped_dek FROM encryption_keys WHERE workspace_id = ${workspaceId}
   `;
   if (existing[0]?.wrapped_dek) {
-    return provider.unwrapKey(existing[0].wrapped_dek);
+    return provider.unwrapKey(existing[0].wrapped_dek, workspaceId);
   }
   const dek = generateDek();
-  const wrapped = await provider.wrapKey(dek);
-  try {
-    await sql`
-      INSERT INTO encryption_keys (workspace_id, wrapped_dek)
-      VALUES (${workspaceId}, ${wrapped})
+  const wrapped = await provider.wrapKey(dek, workspaceId);
+  // Création concurrente : la première ligne gagne, les autres la relisent.
+  const inserted = await sql<{ wrapped_dek: string }[]>`
+    INSERT INTO encryption_keys (workspace_id, wrapped_dek)
+    VALUES (${workspaceId}, ${wrapped})
+    ON CONFLICT (workspace_id) DO NOTHING
+    RETURNING wrapped_dek
+  `;
+  if (inserted[0]) return dek;
+  const winner = await sql<{ wrapped_dek: string }[]>`
+    SELECT wrapped_dek FROM encryption_keys WHERE workspace_id = ${workspaceId}
+  `;
+  if (winner[0]?.wrapped_dek) return provider.unwrapKey(winner[0].wrapped_dek, workspaceId);
+  throw new Error("Failed to initialize workspace encryption key");
+}
+
+export interface PlainField {
+  label: string;
+  fieldType: string;
+  isSensitive: boolean;
+  value: string;
+}
+
+/** Chiffre et insère les champs d'un secret (valeurs liées au secret par AAD). */
+export async function writeSecretFields(
+  tx: Tx,
+  dek: Uint8Array,
+  secretId: string,
+  fields: PlainField[],
+  startPosition = 0,
+): Promise<void> {
+  let position = startPosition;
+  for (const field of fields) {
+    const ciphertext = await encryptField(dek, field.value, secretContext(secretId));
+    await tx`
+      INSERT INTO secret_fields (secret_id, label, field_type, is_sensitive, ciphertext, position)
+      VALUES (${secretId}, ${field.label.slice(0, 100)}, ${field.fieldType}, ${field.isSensitive}, ${ciphertext}, ${position})
     `;
-    return dek;
-  } catch {
-    // Concurrent creation: re-read the winning row.
-    const retry = await sql<{ wrapped_dek: string }[]>`
-      SELECT wrapped_dek FROM encryption_keys WHERE workspace_id = ${workspaceId}
-    `;
-    if (retry[0]?.wrapped_dek) return provider.unwrapKey(retry[0].wrapped_dek);
-    throw new Error("Failed to initialize workspace encryption key");
+    position += 1;
   }
+}
+
+/**
+ * Vérifie qu'un dossier appartient bien au coffre : sans ce contrôle, un
+ * secret pourrait être rattaché au dossier d'un coffre étranger.
+ */
+export async function assertFolderInWorkspace(
+  tx: Tx,
+  folderId: string | null | undefined,
+  workspaceId: string,
+): Promise<void> {
+  if (!folderId) return;
+  const rows = await tx<{ id: string }[]>`
+    SELECT id FROM secret_folders
+    WHERE id = ${folderId} AND workspace_id = ${workspaceId} AND deleted_at IS NULL
+  `;
+  if (!rows[0]) throw new Error("Groupe introuvable dans ce coffre");
 }

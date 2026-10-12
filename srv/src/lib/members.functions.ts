@@ -4,6 +4,7 @@ import { requireAuth } from "./auth-middleware";
 import { getDb, iso } from "./db.server";
 import { requireWorkspacePermission } from "./vault.server";
 import { audit } from "./audit.server";
+import { roleAtLeast, type WorkspaceRole } from "./permissions";
 import type { MemberDto } from "./types";
 
 const workspaceRoleEnum = z.enum(["OWNER", "ADMIN", "EDITOR", "VIEWER"]);
@@ -13,6 +14,18 @@ async function oidcManagesPermissions(): Promise<boolean> {
     SELECT permission_mode FROM oidc_providers WHERE enabled = true LIMIT 5
   `;
   return rows.some((p) => p.permission_mode !== "local");
+}
+
+function assertCanAssign(actorRole: WorkspaceRole, role: WorkspaceRole): void {
+  if (!roleAtLeast(actorRole, role)) {
+    throw new Error("Vous ne pouvez pas attribuer un rôle supérieur au vôtre");
+  }
+}
+
+function assertCanManage(actorRole: WorkspaceRole, targetRole: WorkspaceRole): void {
+  if (!roleAtLeast(actorRole, targetRole)) {
+    throw new Error("Vous ne pouvez pas modifier un membre dont le rôle est supérieur au vôtre");
+  }
 }
 
 export const listMembers = createServerFn({ method: "GET" })
@@ -60,7 +73,8 @@ export const addMember = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { userId } = context;
-    await requireWorkspacePermission(userId, data.workspaceId, "member.invite");
+    const actorRole = await requireWorkspacePermission(userId, data.workspaceId, "member.invite");
+    assertCanAssign(actorRole, data.role);
     const sql = getDb();
 
     const workspaces = await sql<{ is_personal: boolean; name: string }[]>`
@@ -77,19 +91,22 @@ export const addMember = createServerFn({ method: "POST" })
     const profile = profiles[0];
     if (!profile) throw new Error("No account exists for this email address");
 
-    await sql`
+    // Un membre existant n'est jamais écrasé ici : son rôle se change via
+    // updateMemberRole, qui applique les garde-fous de hiérarchie.
+    const inserted = await sql<{ id: string }[]>`
       INSERT INTO workspace_members (workspace_id, user_id, role, managed_by_oidc)
       VALUES (${data.workspaceId}, ${profile.id}, ${data.role}, false)
-      ON CONFLICT (workspace_id, user_id)
-      DO UPDATE SET role = EXCLUDED.role, managed_by_oidc = false
+      ON CONFLICT (workspace_id, user_id) DO NOTHING
+      RETURNING id
     `;
+    if (!inserted[0]) throw new Error("Cette personne est déjà membre du coffre");
     await audit({
       userId,
       workspaceId: data.workspaceId,
       action: "member.added",
       targetType: "member",
       targetId: profile.id,
-      targetLabel: profile.email,
+      targetLabel: `${profile.email ?? ""} (${data.role})`,
     });
     return { ok: true };
   });
@@ -105,31 +122,35 @@ export const updateMemberRole = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { userId } = context;
-    await requireWorkspacePermission(userId, data.workspaceId, "member.update");
+    const actorRole = await requireWorkspacePermission(userId, data.workspaceId, "member.update");
+    assertCanAssign(actorRole, data.role);
     if (await oidcManagesPermissions()) {
       throw new Error("Memberships are managed by the identity provider");
     }
-    const sql = getDb();
-    const targets = await sql<{ role: string; managed_by_oidc: boolean }[]>`
-      SELECT role, managed_by_oidc FROM workspace_members
-      WHERE workspace_id = ${data.workspaceId} AND user_id = ${data.targetUserId}
-    `;
-    const target = targets[0];
-    if (!target) throw new Error("Member not found");
-    if (target.managed_by_oidc) throw new Error("This membership is managed by the identity provider");
-    if (target.role === "OWNER" && data.role !== "OWNER") {
-      const owners = await sql<{ count: string }[]>`
-        SELECT count(*)::text AS count FROM workspace_members
-        WHERE workspace_id = ${data.workspaceId} AND role = 'OWNER'
+    await getDb().begin(async (tx) => {
+      // Verrouille les adhésions du coffre : le décompte des propriétaires
+      // reste exact face à des modifications simultanées.
+      const members = await tx<{ user_id: string; role: WorkspaceRole; managed_by_oidc: boolean }[]>`
+        SELECT user_id, role, managed_by_oidc FROM workspace_members
+        WHERE workspace_id = ${data.workspaceId}
+        FOR UPDATE
       `;
-      if (Number(owners[0]?.count ?? 0) <= 1) {
+      const target = members.find((m) => m.user_id === data.targetUserId);
+      if (!target) throw new Error("Member not found");
+      if (target.managed_by_oidc) throw new Error("This membership is managed by the identity provider");
+      assertCanManage(actorRole, target.role);
+      if (
+        target.role === "OWNER" &&
+        data.role !== "OWNER" &&
+        members.filter((m) => m.role === "OWNER").length <= 1
+      ) {
         throw new Error("A workspace must keep at least one owner");
       }
-    }
-    await sql`
-      UPDATE workspace_members SET role = ${data.role}
-      WHERE workspace_id = ${data.workspaceId} AND user_id = ${data.targetUserId}
-    `;
+      await tx`
+        UPDATE workspace_members SET role = ${data.role}
+        WHERE workspace_id = ${data.workspaceId} AND user_id = ${data.targetUserId}
+      `;
+    });
     await audit({
       userId,
       workspaceId: data.workspaceId,
@@ -148,7 +169,7 @@ export const removeMember = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { userId } = context;
-    await requireWorkspacePermission(userId, data.workspaceId, "member.delete");
+    const actorRole = await requireWorkspacePermission(userId, data.workspaceId, "member.delete");
     if (await oidcManagesPermissions()) {
       throw new Error("Memberships are managed by the identity provider");
     }
@@ -159,10 +180,23 @@ export const removeMember = createServerFn({ method: "POST" })
     const ws = workspaces[0];
     if (ws?.is_personal) throw new Error("Members cannot be removed from a personal vault");
     if (ws?.owner_id === data.targetUserId) throw new Error("The workspace owner cannot be removed");
-    await sql`
-      DELETE FROM workspace_members
-      WHERE workspace_id = ${data.workspaceId} AND user_id = ${data.targetUserId}
-    `;
+    await sql.begin(async (tx) => {
+      const members = await tx<{ user_id: string; role: WorkspaceRole }[]>`
+        SELECT user_id, role FROM workspace_members
+        WHERE workspace_id = ${data.workspaceId}
+        FOR UPDATE
+      `;
+      const target = members.find((m) => m.user_id === data.targetUserId);
+      if (!target) throw new Error("Member not found");
+      assertCanManage(actorRole, target.role);
+      if (target.role === "OWNER" && members.filter((m) => m.role === "OWNER").length <= 1) {
+        throw new Error("A workspace must keep at least one owner");
+      }
+      await tx`
+        DELETE FROM workspace_members
+        WHERE workspace_id = ${data.workspaceId} AND user_id = ${data.targetUserId}
+      `;
+    });
     await audit({
       userId,
       workspaceId: data.workspaceId,

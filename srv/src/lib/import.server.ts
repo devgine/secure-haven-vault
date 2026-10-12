@@ -5,17 +5,21 @@
 // Chaque valeur reçue est immédiatement chiffrée (AES-256-GCM, DEK du coffre)
 // avant d'être écrite. Aucune valeur n'est journalisée.
 
-import type postgres from "postgres";
-import { getDb } from "./db.server";
-import { encryptField } from "./crypto.server";
-import { getOrCreateDek, requireWorkspacePermission } from "./vault.server";
+import { getDb, type Tx } from "./db.server";
+import { attachmentContext, encryptField } from "./crypto.server";
+import { getOrCreateDek, requireWorkspacePermission, writeSecretFields } from "./vault.server";
+import { ensureBaselineSnapshot, recordVersion } from "./versions.server";
 import type { DuplicateCriterion, DuplicateStrategy } from "./keepass/types";
 import type { ImportItemPayload } from "./keepass/mapping";
 
 export const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
 export const MAX_BATCH_ITEMS = 50;
 
-type Tx = postgres.Sql | postgres.TransactionSql;
+/** Taille réelle d'un contenu base64, sans le décoder ni se fier au client. */
+export function base64DecodedSize(b64: string): number {
+  const padding = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+  return Math.floor((b64.length * 3) / 4) - padding;
+}
 
 /** Crée (ou réutilise) l'arborescence de dossiers. Idempotent par nom+parent. */
 export async function ensureFolderPath(
@@ -132,24 +136,6 @@ export async function findDuplicate(
   return rows[0]?.id ?? null;
 }
 
-async function writeFields(
-  tx: Tx,
-  dek: Uint8Array,
-  secretId: string,
-  fields: ImportItemPayload["fields"],
-  startPosition = 0,
-): Promise<void> {
-  let position = startPosition;
-  for (const field of fields) {
-    const ciphertext = await encryptField(dek, field.value);
-    await tx`
-      INSERT INTO secret_fields (secret_id, label, field_type, is_sensitive, ciphertext, position)
-      VALUES (${secretId}, ${field.label.slice(0, 100)}, ${field.fieldType}, ${field.isSensitive}, ${ciphertext}, ${position})
-    `;
-    position += 1;
-  }
-}
-
 async function writeAttachments(
   tx: Tx,
   dek: Uint8Array,
@@ -159,14 +145,17 @@ async function writeAttachments(
   let stored = 0;
   const warnings: string[] = [];
   for (const att of attachments) {
-    if (att.size > MAX_ATTACHMENT_SIZE) {
+    // La taille est mesurée sur le contenu reçu : celle déclarée par le
+    // client n'est pas digne de confiance.
+    const size = base64DecodedSize(att.dataB64);
+    if (size > MAX_ATTACHMENT_SIZE) {
       warnings.push(`Pièce jointe trop volumineuse ignorée pour une entrée importée.`);
       continue;
     }
-    const ciphertext = await encryptField(dek, att.dataB64);
+    const ciphertext = await encryptField(dek, att.dataB64, attachmentContext(secretId));
     await tx`
       INSERT INTO secret_attachments (secret_id, filename, mime_type, size_bytes, ciphertext)
-      VALUES (${secretId}, ${att.filename.slice(0, 200)}, ${att.mimeType}, ${att.size}, ${ciphertext})
+      VALUES (${secretId}, ${att.filename.slice(0, 200)}, ${att.mimeType}, ${size}, ${ciphertext})
     `;
     stored += 1;
   }
@@ -265,7 +254,8 @@ export async function runImportBatch(params: BatchParams): Promise<BatchResult> 
           `;
           const known = new Set(existingLabels.map((f) => f.label.toLowerCase()));
           const missing = item.fields.filter((f) => !known.has(f.label.toLowerCase()));
-          await writeFields(tx, dek, existingId, missing, existingLabels.length);
+          await ensureBaselineSnapshot(tx, dek, existingId);
+          await writeSecretFields(tx, dek, existingId, missing, existingLabels.length);
           await tx`
             UPDATE secrets SET
               username = COALESCE(username, ${item.username}),
@@ -274,10 +264,14 @@ export async function runImportBatch(params: BatchParams): Promise<BatchResult> 
               updated_by = ${params.userId}
             WHERE id = ${existingId}
           `;
-          await tx`
-            INSERT INTO secret_versions (secret_id, version, action, changed_by, changed_fields)
-            VALUES (${existingId}, 1, 'import.merge', ${params.userId}, ${tx.array(missing.map((f) => f.label))})
-          `;
+          await recordVersion(
+            tx,
+            dek,
+            existingId,
+            "import.merge",
+            params.userId,
+            missing.map((f) => f.label),
+          );
           await tx`UPDATE import_items SET status = 'merged', secret_id = ${existingId} WHERE job_id = ${params.jobId} AND client_key = ${item.clientKey}`;
           return "merged" as const;
         }
@@ -287,10 +281,7 @@ export async function runImportBatch(params: BatchParams): Promise<BatchResult> 
           // Version récupérable : l'ancienne entrée est mise à la corbeille,
           // jamais supprimée définitivement.
           await tx`UPDATE secrets SET deleted_at = now(), updated_by = ${params.userId} WHERE id = ${existingId}`;
-          await tx`
-            INSERT INTO secret_versions (secret_id, version, action, changed_by, changed_fields)
-            VALUES (${existingId}, 1, 'import.replaced', ${params.userId}, ${tx.array([] as string[])})
-          `;
+          await recordVersion(tx, dek, existingId, "import.replaced", params.userId);
         }
 
         const inserted = await tx<{ id: string }[]>`
@@ -308,14 +299,11 @@ export async function runImportBatch(params: BatchParams): Promise<BatchResult> 
           RETURNING id
         `;
         const secretId = inserted[0]!.id;
-        await writeFields(tx, dek, secretId, item.fields);
+        await writeSecretFields(tx, dek, secretId, item.fields);
         const att = await writeAttachments(tx, dek, secretId, item.attachments);
         result.attachments += att.stored;
         result.warnings.push(...att.warnings);
-        await tx`
-          INSERT INTO secret_versions (secret_id, version, action, changed_by, changed_fields)
-          VALUES (${secretId}, 1, 'import.created', ${params.userId}, ${tx.array([] as string[])})
-        `;
+        await recordVersion(tx, dek, secretId, "import.created", params.userId);
         const status = existingId && params.strategy === "replace" ? "replaced" : "imported";
         await tx`UPDATE import_items SET status = ${status}, secret_id = ${secretId} WHERE job_id = ${params.jobId} AND client_key = ${item.clientKey}`;
         return status as "replaced" | "imported";

@@ -2,11 +2,12 @@
 //
 // - Mots de passe : scrypt (node:crypto), sel aléatoire 128 bits par compte.
 //   Format stocké : "s1.<salt_b64>.<hash_b64>".
-// - Sessions : jeton opaque 256 bits, seul son empreinte SHA-256 est stockée.
+// - Sessions : jeton opaque 256 bits, seule son empreinte SHA-256 est stockée.
 //   Durée 7 jours, last_seen glissant. Le jeton vit dans un cookie httpOnly.
 import { createHash, randomBytes, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
-import { getDb } from "./db.server";
+import type postgres from "postgres";
+import { getDb, type Tx } from "./db.server";
 import { SESSION_COOKIE } from "./session-cookie";
 
 const scrypt = promisify(scryptCb);
@@ -29,6 +30,22 @@ export async function verifyPassword(password: string, stored: string): Promise<
   const expected = Buffer.from(hashB64, "base64");
   const derived = (await scrypt(password, salt, expected.length)) as Buffer;
   return timingSafeEqual(derived, expected);
+}
+
+let dummyHash: Promise<string> | undefined;
+
+/**
+ * Vérifie le mot de passe en temps comparable que le compte existe ou non :
+ * sans hash stocké, on calcule quand même un scrypt contre un hash factice.
+ */
+export async function verifyPasswordOrDummy(
+  password: string,
+  stored: string | null | undefined,
+): Promise<boolean> {
+  if (stored) return verifyPassword(password, stored);
+  dummyHash ??= hashPassword(randomBytes(16).toString("hex"));
+  await verifyPassword(password, await dummyHash);
+  return false;
 }
 
 // ── Sessions ─────────────────────────────────────────────────────────────────
@@ -79,8 +96,12 @@ export async function validateSession(token: string | undefined): Promise<Sessio
   if (row.banned_until && new Date(row.banned_until).getTime() > Date.now()) {
     return null;
   }
-  // Touch glissant (sans prolonger l'expiration absolue).
-  await sql`UPDATE sessions SET last_seen_at = now() WHERE id = ${row.session_id}`;
+  // Touch glissant (sans prolonger l'expiration absolue), au plus une
+  // écriture toutes les 5 minutes par session.
+  await sql`
+    UPDATE sessions SET last_seen_at = now()
+    WHERE id = ${row.session_id} AND last_seen_at < now() - interval '5 minutes'
+  `;
   return { id: row.user_id, email: row.email };
 }
 
@@ -107,22 +128,33 @@ export async function isSignupEnabled(): Promise<boolean> {
   return rows[0]?.value !== false;
 }
 
+export interface ProvisionOptions {
+  displayName?: string | null;
+  /** Rôle applicatif du compte (défaut : USER). */
+  role?: "SUPER_ADMIN" | "USER";
+  /** Ignore la fermeture des inscriptions (amorçage administrateur). */
+  bypassSignupGate?: boolean;
+}
+
 /**
  * Crée le compte + profil + rôle applicatif + coffre personnel, en transaction.
- * Le tout premier compte de la plateforme devient SUPER_ADMIN.
- * Refuse si les inscriptions sont fermées ou si l'email existe déjà.
+ * Refuse si les inscriptions sont fermées ou si l'email existe déjà. Aucun
+ * compte ne devient administrateur par simple inscription : le SUPER_ADMIN
+ * initial est amorcé par ADMIN_EMAIL / ADMIN_PASSWORD (bootstrap.server.ts).
  */
 export async function provisionUser(
   email: string,
   passwordHash: string | null,
-  displayName?: string | null,
+  options: ProvisionOptions = {},
+  transaction?: postgres.TransactionSql,
 ): Promise<string> {
-  const sql = getDb();
-  return sql.begin(async (tx) => {
-    const gate = await tx<{ value: boolean }[]>`
-      SELECT value FROM platform_settings WHERE key = 'signup_enabled'
-    `;
-    if (gate.length > 0 && gate[0]!.value === false) throw new Error("signup_disabled");
+  const run = async (tx: Tx) => {
+    if (!options.bypassSignupGate) {
+      const gate = await tx<{ value: boolean }[]>`
+        SELECT value FROM platform_settings WHERE key = 'signup_enabled'
+      `;
+      if (gate.length > 0 && gate[0]!.value === false) throw new Error("signup_disabled");
+    }
 
     const existing = await tx<{ id: string }[]>`
       SELECT id FROM users WHERE lower(email) = lower(${email})
@@ -133,16 +165,13 @@ export async function provisionUser(
       INSERT INTO users (email, password_hash) VALUES (${email}, ${passwordHash}) RETURNING id
     `;
     const userId = inserted[0]!.id;
-    const name = displayName ?? email.split("@")[0] ?? email;
+    const name = options.displayName ?? email.split("@")[0] ?? email;
     await tx`
       INSERT INTO profiles (id, email, display_name) VALUES (${userId}, ${email}, ${name})
     `;
-    const admins = await tx<{ x: number }[]>`
-      SELECT 1 AS x FROM user_roles WHERE role = 'SUPER_ADMIN' LIMIT 1
-    `;
     await tx`
       INSERT INTO user_roles (user_id, role)
-      VALUES (${userId}, ${admins.length === 0 ? "SUPER_ADMIN" : "USER"}::app_role)
+      VALUES (${userId}, ${options.role ?? "USER"}::app_role)
     `;
     const ws = await tx<{ id: string }[]>`
       INSERT INTO workspaces (name, is_personal, owner_id)
@@ -153,14 +182,50 @@ export async function provisionUser(
       VALUES (${ws[0]!.id}, ${userId}, 'OWNER')
     `;
     return userId;
-  });
+  };
+  // Réutilise la transaction de l'appelant quand il en fournit une.
+  return transaction ? run(transaction) : getDb().begin(run);
 }
 
-/** Connexion SSO : retrouve le compte par email ou le provisionne (sans mot de passe). */
-export async function findOrCreateOidcUser(email: string, displayName: string): Promise<string> {
-  const existing = await getDb()<{ id: string }[]>`
-    SELECT id FROM users WHERE lower(email) = lower(${email})
-  `;
-  if (existing[0]) return existing[0].id;
-  return provisionUser(email, null, displayName);
+export interface OidcLogin {
+  providerId: string;
+  subject: string;
+  email: string;
+  displayName: string;
+}
+
+/**
+ * Connexion SSO. Le compte est identifié par le `sub` du fournisseur ; l'email
+ * ne sert qu'au tout premier rattachement (l'appelant a déjà exigé un email
+ * vérifié). Un compte déjà lié à un autre `sub` n'est jamais réattribué.
+ */
+export async function resolveOidcUser(
+  login: OidcLogin,
+): Promise<{ userId: string; linked: boolean }> {
+  return getDb().begin(async (tx) => {
+    const identities = await tx<{ user_id: string }[]>`
+      SELECT user_id FROM oidc_identities
+      WHERE provider_id = ${login.providerId} AND subject = ${login.subject}
+    `;
+    if (identities[0]) return { userId: identities[0].user_id, linked: false };
+
+    const existing = await tx<{ id: string }[]>`
+      SELECT id FROM users WHERE lower(email) = lower(${login.email})
+    `;
+    let userId = existing[0]?.id;
+    if (userId) {
+      const other = await tx<{ id: string }[]>`
+        SELECT id FROM oidc_identities
+        WHERE provider_id = ${login.providerId} AND user_id = ${userId}
+      `;
+      if (other.length > 0) throw new Error("identity_conflict");
+    } else {
+      userId = await provisionUser(login.email, null, { displayName: login.displayName }, tx);
+    }
+    await tx`
+      INSERT INTO oidc_identities (provider_id, subject, user_id)
+      VALUES (${login.providerId}, ${login.subject}, ${userId})
+    `;
+    return { userId, linked: true };
+  });
 }

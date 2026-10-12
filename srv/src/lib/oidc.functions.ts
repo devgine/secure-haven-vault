@@ -68,7 +68,8 @@ export const saveOidcProvider = createServerFn({ method: "POST" })
     let secretCiphertext: string | null = existing?.client_secret_ciphertext ?? null;
     if (data.clientSecret) {
       const { encryptWithMaster } = await import("./crypto.server");
-      secretCiphertext = await encryptWithMaster(data.clientSecret);
+      const { OIDC_CLIENT_SECRET_CONTEXT } = await import("./oidc.server");
+      secretCiphertext = await encryptWithMaster(data.clientSecret, OIDC_CLIENT_SECRET_CONTEXT);
     }
     if (!secretCiphertext) throw new Error("Le secret client est requis");
 

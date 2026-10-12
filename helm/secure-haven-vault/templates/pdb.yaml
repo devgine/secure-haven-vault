@@ -6,7 +6,7 @@ metadata:
   labels:
     {{- include "secure-haven-vault.labels" . | nindent 4 }}
 spec:
-  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
   selector:
     matchLabels:
       {{- include "secure-haven-vault.selectorLabels" . | nindent 6 }}

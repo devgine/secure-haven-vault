@@ -33,3 +33,12 @@ dist-ssr
 
 # Helm
 charts
+
+# Sauvegardes locales de la base (task db:backup)
+backups
+
+# Cache de Task (empreintes des tâches)
+.task
+
+# Compose
+compose.override.yaml

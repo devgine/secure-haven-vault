@@ -45,6 +45,7 @@ function SettingsPage() {
 
   const [displayName, setDisplayName] = useState<string | null>(null);
   const [lockTimeout, setLockTimeout] = useState<string | null>(null);
+  const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -72,7 +73,8 @@ function SettingsPage() {
       return;
     }
     try {
-      await changePasswordServerFn({ data: { newPassword } });
+      await changePasswordServerFn({ data: { currentPassword, newPassword } });
+      setCurrentPassword("");
       setNewPassword("");
       toast.success("Mot de passe mis à jour — vos autres sessions ont été fermées");
     } catch (err) {
@@ -147,23 +149,43 @@ function SettingsPage() {
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Changer de mot de passe</CardTitle>
-          <CardDescription>12 caractères minimum. Les autres sessions resteront actives jusqu'à expiration.</CardDescription>
+          <CardDescription>
+            {session?.hasPassword === false
+              ? "Ce compte est géré par le SSO : son mot de passe se modifie chez votre fournisseur d'identité."
+              : "12 caractères minimum. Vos autres sessions seront fermées."}
+          </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="new-password">Nouveau mot de passe</Label>
-            <Input
-              id="new-password"
-              type="password"
-              autoComplete="new-password"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-            />
-          </div>
-          <Button variant="outline" onClick={() => void changePassword()} disabled={!newPassword}>
-            Mettre à jour
-          </Button>
-        </CardContent>
+        {session?.hasPassword !== false && (
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="current-password">Mot de passe actuel</Label>
+              <Input
+                id="current-password"
+                type="password"
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="new-password">Nouveau mot de passe</Label>
+              <Input
+                id="new-password"
+                type="password"
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+              />
+            </div>
+            <Button
+              variant="outline"
+              onClick={() => void changePassword()}
+              disabled={!currentPassword || !newPassword}
+            >
+              Mettre à jour
+            </Button>
+          </CardContent>
+        )}
       </Card>
     </div>
   );

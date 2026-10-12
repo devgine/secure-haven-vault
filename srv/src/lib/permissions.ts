@@ -100,6 +100,25 @@ export function roleHasPermission(
   return ROLE_PERMISSIONS[role].includes(permission);
 }
 
+const ROLE_RANK: Record<WorkspaceRole, number> = { VIEWER: 0, EDITOR: 1, ADMIN: 2, OWNER: 3 };
+
+/**
+ * Hiérarchie des rôles pour la gestion des membres : on ne peut ni attribuer
+ * un rôle supérieur au sien, ni modifier ou retirer un membre mieux placé.
+ * Sans cette règle, un ADMIN pourrait se promouvoir OWNER.
+ */
+export function roleAtLeast(
+  actor: WorkspaceRole | null | undefined,
+  other: WorkspaceRole,
+): boolean {
+  return actor != null && ROLE_RANK[actor] >= ROLE_RANK[other];
+}
+
+/** Rôles qu'un membre peut attribuer, du plus élevé au plus faible. */
+export function assignableRoles(actor: WorkspaceRole | null | undefined): WorkspaceRole[] {
+  return (["OWNER", "ADMIN", "EDITOR", "VIEWER"] as const).filter((r) => roleAtLeast(actor, r));
+}
+
 export const ROLE_LABELS: Record<WorkspaceRole, string> = {
   OWNER: "Propriétaire",
   ADMIN: "Admin",

@@ -1,9 +1,15 @@
-replicaCount: 1
+# Deux réplicas par défaut : l'application est sans état (sessions et
+# limitation de débit en base, migrations sérialisées par verrou).
+replicaCount: 2
 
 image:
   repository: ghcr.io/devgine/secure-haven-vault
   pullPolicy: IfNotPresent
-  tag: latest
+  # Vide = appVersion du chart. Ne jamais déployer "latest" : le tag doit
+  # identifier une version précise pour pouvoir revenir en arrière.
+  tag: ""
+  # Optionnel : digest immuable (sha256:…), prioritaire sur le tag.
+  digest: ""
 
 imagePullSecrets: []
 nameOverride: ""
@@ -38,6 +44,8 @@ service:
 ingress:
   enabled: false
   className: ""
+  # Avec ingress-nginx, autorisez les lots d'import KeePass (24 Mo max côté
+  # application) : nginx.ingress.kubernetes.io/proxy-body-size: "24m"
   annotations: {}
   hosts:
     - host: vault.example.com
@@ -47,75 +55,147 @@ ingress:
   tls: []
 
 config:
-  masterEncryptionKey: ""
+  # URL publique de l'application (ex. https://vault.example.com). Sert au
+  # drapeau Secure du cookie de session et aux redirections OIDC. Vide =
+  # https://<premier hôte de l'ingress> quand l'ingress est activé.
+  appUrl: ""
+  # Fait confiance à X-Forwarded-For/Proto/Host. À laisser à true derrière un
+  # ingress ; à passer à false si les pods sont joignables directement.
+  trustProxy: true
+
+  # Secret applicatif. En production, créez-le vous-même (External Secrets,
+  # Sealed Secrets…) et référencez-le via existingSecret ; les valeurs en clair
+  # ci-dessous ne servent qu'aux déploiements locaux.
   existingSecret: ""
+  masterEncryptionKey: ""
   masterEncryptionKeyKey: master-encryption-key
+  # Clé (facultative) du secret portant l'ANCIENNE clé maître pendant une
+  # rotation ; voir « Rotation de la clé maître » dans le README.
+  previousMasterEncryptionKeyKey: master-encryption-key-previous
+  # Utilisée uniquement avec une base externe (postgresql.enabled=false).
   databaseUrlKey: database-url
+
+  # Compte SUPER_ADMIN créé au premier démarrage. Aucun compte ne devient
+  # administrateur par simple inscription.
+  admin:
+    email: ""
+    # Déploiement local uniquement ; sinon clé `passwordKey` de existingSecret.
+    password: ""
+    passwordKey: admin-password
+
+  # Rétention du journal d'audit en jours (0 = illimitée).
+  auditRetentionDays: 365
   extraEnv: []
 
 resources:
   requests:
     cpu: 100m
-    memory: 128Mi
+    memory: 256Mi
   limits:
     memory: 512Mi
 
 probes:
+  # Laisse jusqu'à 2 minutes au premier démarrage (migrations de schéma).
+  startup:
+    path: /api/public/ready
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 24
   liveness:
     path: /api/public/health
-    initialDelaySeconds: 20
     periodSeconds: 30
     timeoutSeconds: 5
     failureThreshold: 3
   readiness:
     path: /api/public/ready
-    initialDelaySeconds: 5
     periodSeconds: 10
     timeoutSeconds: 5
-    failureThreshold: 6
+    failureThreshold: 3
 
 autoscaling:
   enabled: false
-  minReplicas: 1
-  maxReplicas: 3
+  minReplicas: 2
+  maxReplicas: 4
   targetCPUUtilizationPercentage: 80
 
 podDisruptionBudget:
-  enabled: false
-  minAvailable: 1
+  enabled: true
+  maxUnavailable: 1
 
 nodeSelector: {}
 tolerations: []
+# Vide = anti-affinité souple : les réplicas évitent de partager un nœud.
 affinity: {}
 
+networkPolicy:
+  enabled: true
+  # Sources autorisées à joindre l'application (liste de `from` NetworkPolicy).
+  # Vide = toute source ; restreignez au namespace de votre ingress controller.
+  appIngressFrom: []
+  # Namespace de l'opérateur CloudNativePG, qui doit joindre les instances.
+  cnpgOperatorNamespace: cnpg-system
+  # Sources supplémentaires autorisées vers PostgreSQL (ex. sauvegardes).
+  postgresqlExtraIngressFrom: []
+
+# Base PostgreSQL gérée par l'opérateur CloudNativePG (à installer au préalable).
 postgresql:
   enabled: true
-  image:
-    repository: postgres
-    tag: "18-alpine"
-    pullPolicy: IfNotPresent
+  # 1 = sans haute disponibilité (local). Production : 3.
+  instances: 1
+  # Vide = image par défaut de l'opérateur.
+  imageName: ""
   auth:
     username: vault
-    password: ""
     database: vault
+    # Déploiement local uniquement.
+    password: ""
+    # Secret de type kubernetes.io/basic-auth (clés `username` et `password`).
     existingSecret: ""
-    passwordKey: postgres-password
-  persistence:
-    enabled: true
-    storageClass: ""
-    accessModes: [ReadWriteOnce]
+  storage:
     size: 8Gi
+    storageClass: ""
   resources:
     requests:
       cpu: 100m
       memory: 256Mi
     limits:
       memory: 1Gi
+  # Paramètres postgresql.conf supplémentaires.
+  parameters: {}
+  # Rôle en lecture seule de l'exporter de métriques : il ne lit que la vue
+  # secret_expiry_metrics. Créé quand prometheus-postgres-exporter est activé.
+  metricsRole:
+    name: exporter
+    # Déploiement local uniquement.
+    password: ""
+    # Secret de type kubernetes.io/basic-auth (clés `username` et `password`).
+    existingSecret: ""
+  # Sauvegardes continues vers un stockage objet : contenu repris tel quel dans
+  # `spec.backup` du Cluster (barmanObjectStore, retentionPolicy…).
+  backup: {}
+  scheduledBackup:
+    enabled: false
+    # Format cron à 6 champs (secondes en premier) : tous les jours à 2 h.
+    schedule: "0 0 2 * * *"
+  # PodMonitor des métriques natives de CloudNativePG (Prometheus Operator requis).
+  enablePodMonitor: false
 
 prometheus-postgres-exporter:
   enabled: false
   serviceMonitor:
     enabled: true
+  # Ces valeurs passent par `tpl`. Elles supposent un nom de release contenant
+  # « secure-haven-vault » ; sinon, remplacez-les par
+  # <fullname>-postgresql-rw et <fullname>-metrics.
+  config:
+    datasource:
+      host: "{{ .Release.Name }}-postgresql-rw"
+      user: exporter
+      passwordSecret:
+        name: "{{ .Release.Name }}-metrics"
+        key: password
+      database: vault
+      sslmode: require
   extraEnvs:
     - name: PG_EXPORTER_EXTEND_QUERY_PATH
       value: /etc/postgres_exporter/queries.yaml
@@ -127,5 +207,7 @@ prometheus-postgres-exporter:
     - name: queries
       mountPath: /etc/postgres_exporter
 
+# Base PostgreSQL externe (postgresql.enabled=false). L'URL est stockée dans le
+# secret applicatif ; encodez les caractères spéciaux du mot de passe.
 externalDatabase:
   url: ""

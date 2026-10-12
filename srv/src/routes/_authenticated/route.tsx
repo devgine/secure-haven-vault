@@ -46,7 +46,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { createWorkspace, getSessionInfo, listWorkspaces } from "@/lib/vault.functions";
-import { getCurrentUser, recordAuthEvent, signOut as signOutFn } from "@/lib/auth.functions";
+import { getCurrentUser, signOut as signOutFn } from "@/lib/auth.functions";
 import { cn } from "@/lib/utils";
 
 // Auth gate for the whole protected subtree. La session vit dans un cookie
@@ -70,7 +70,7 @@ function useInactivityLock(timeoutMinutes: number) {
     const lock = async () => {
       await queryClient.cancelQueries();
       queryClient.clear();
-      await signOutFn();
+      await signOutFn({ data: { reason: "lock" } });
       navigate({ to: "/auth", search: { locked: "1" }, replace: true });
     };
     const reset = () => {
@@ -225,7 +225,6 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
 function AuthenticatedShell() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const logAuth = useServerFn(recordAuthEvent);
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const { data: session } = useQuery({
@@ -239,10 +238,7 @@ function AuthenticatedShell() {
   const signOut = async (reason: "logout" | "lock") => {
     await queryClient.cancelQueries();
     queryClient.clear();
-    if (reason === "logout") {
-      await logAuth({ data: { action: "auth.logout", email: session?.email ?? undefined } });
-    }
-    await signOutFn();
+    await signOutFn({ data: { reason } });
     navigate({
       to: "/auth",
       search: reason === "lock" ? { locked: "1" } : {},

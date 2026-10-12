@@ -191,16 +191,55 @@ export const deleteUserAccount = createServerFn({ method: "POST" })
     const target = await sql<{ email: string | null }[]>`
       SELECT email FROM users WHERE id = ${data.targetUserId}
     `;
-    // Les coffres possédés (dont le coffre personnel) sont supprimés en cascade
-    // avec le compte ; les secrets pointent ensuite sur NULL (ON DELETE SET NULL).
-    await sql`DELETE FROM users WHERE id = ${data.targetUserId}`;
+    if (!target[0]) throw new Error("Utilisateur introuvable");
+
+    // Un coffre d'équipe ne disparaît jamais avec le compte de son créateur :
+    // sa propriété passe à un autre propriétaire, sinon la suppression est
+    // refusée. Seuls le coffre personnel et les coffres déjà supprimés partent.
+    const transferred = await sql.begin(async (tx) => {
+      const owned = await tx<{ id: string; name: string; successor: string | null }[]>`
+        SELECT w.id, w.name,
+               (SELECT m.user_id FROM workspace_members m
+                 WHERE m.workspace_id = w.id AND m.role = 'OWNER'
+                   AND m.user_id <> ${data.targetUserId}
+                 ORDER BY m.created_at ASC LIMIT 1) AS successor
+        FROM workspaces w
+        WHERE w.owner_id = ${data.targetUserId}
+          AND w.is_personal = false AND w.deleted_at IS NULL
+        FOR UPDATE OF w
+      `;
+      const orphans = owned.filter((w) => !w.successor);
+      if (orphans.length > 0) {
+        throw new Error(
+          `Ce compte est l'unique propriétaire de : ${orphans.map((w) => w.name).join(", ")}. ` +
+            "Nommez un autre propriétaire dans ces coffres (ou supprimez-les) avant de supprimer le compte.",
+        );
+      }
+      for (const w of owned) {
+        await tx`UPDATE workspaces SET owner_id = ${w.successor} WHERE id = ${w.id}`;
+      }
+      await tx`DELETE FROM workspaces WHERE owner_id = ${data.targetUserId}`;
+      await tx`DELETE FROM users WHERE id = ${data.targetUserId}`;
+      return owned;
+    });
+    for (const w of transferred) {
+      await audit({
+        userId: context.userId,
+        actorEmail: context.userEmail,
+        action: "workspace.owner_transferred",
+        workspaceId: w.id,
+        targetType: "workspace",
+        targetId: w.id,
+        targetLabel: w.name,
+      });
+    }
     await audit({
       userId: context.userId,
       actorEmail: context.userEmail,
       action: "admin.user_deleted",
       targetType: "user",
       targetId: data.targetUserId,
-      targetLabel: target[0]?.email ?? null,
+      targetLabel: target[0].email ?? null,
     });
     return { ok: true };
   });
@@ -257,18 +296,18 @@ export const createWorkspaceAdmin = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     await requireSuperAdmin(context.userId);
     const ownerId = data.ownerId ?? context.userId;
-    const sql = getDb();
-    const rows = await sql<{ id: string }[]>`
-      INSERT INTO workspaces (name, description, owner_id, is_personal)
-      VALUES (${data.name.trim()}, ${data.description?.trim() || null}, ${ownerId}, false)
-      RETURNING id
-    `;
-    const id = rows[0]!.id;
-    await sql`
-      INSERT INTO workspace_members (workspace_id, user_id, role)
-      VALUES (${id}, ${ownerId}, 'OWNER')
-      ON CONFLICT (workspace_id, user_id) DO NOTHING
-    `;
+    const id = await getDb().begin(async (tx) => {
+      const rows = await tx<{ id: string }[]>`
+        INSERT INTO workspaces (name, description, owner_id, is_personal)
+        VALUES (${data.name.trim()}, ${data.description?.trim() || null}, ${ownerId}, false)
+        RETURNING id
+      `;
+      await tx`
+        INSERT INTO workspace_members (workspace_id, user_id, role)
+        VALUES (${rows[0]!.id}, ${ownerId}, 'OWNER')
+      `;
+      return rows[0]!.id;
+    });
     await audit({
       userId: context.userId,
       actorEmail: context.userEmail,

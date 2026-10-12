@@ -44,8 +44,10 @@ l'application (par ex. `sentinel`), et l'URL publique de l'application
 
    > L'URI de redirection doit être **exacte** (schéma, hôte, chemin). Toute
    > différence provoque une erreur `invalid_redirect_uri` au retour de Keycloak.
-   > En développement local, ajoutez aussi
-   > `http://localhost:3000/api/public/oidc/callback`.
+   > L'application construit cette URI à partir de son URL publique (variable
+   > `APP_URL`, ou `config.appUrl` du chart Helm) : elle doit valoir exactement
+   > la *Root URL* ci-dessus. En développement local, ajoutez l'URI
+   > correspondant à votre `APP_URL` de développement.
 
 6. Cliquez **Save**.
 
@@ -103,8 +105,33 @@ annoncée dans le document de découverte correspond à l'URL publique (option
 
 L'application demande `openid email profile groups`. Assurez-vous que les client
 scopes `email` et `profile` restent assignés au client (c'est le cas par défaut).
-L'email est utilisé comme identifiant de compte côté application : activez
-**Email** et une méthode de vérification appropriée sur les utilisateurs fédérés.
+
+### 1.6 Identité et email vérifié
+
+- Un compte est identifié par le claim `sub` (identifiant Keycloak de
+  l'utilisateur), pas par son email : changer d'adresse côté Keycloak ne crée pas
+  de nouveau compte, et une autre personne récupérant la même adresse n'hérite
+  pas du compte.
+- L'email ne sert qu'au **premier rattachement** : si un compte local porte déjà
+  cette adresse, il est lié à l'identité Keycloak. Pour empêcher qu'un utilisateur
+  s'approprie ainsi le compte d'un autre, l'application **refuse toute connexion
+  dont le claim `email_verified` n'est pas `true`** (erreur `email_not_verified`).
+  Dans Keycloak : fiche utilisateur → **Email verified** = `On`, ou activez
+  *Verify email* dans **Realm settings → Login**.
+- Un compte déjà lié à une identité refuse tout autre `sub` présentant la même
+  adresse (erreur `identity_conflict`).
+- Les comptes créés par le SSO n'ont pas de mot de passe local : la page
+  Paramètres ne propose pas d'en définir un.
+
+Si votre fournisseur n'émet pas `email_verified` mais garantit lui-même la
+propriété des adresses, définissez `OIDC_REQUIRE_VERIFIED_EMAIL=false` sur
+l'application.
+
+### 1.7 PKCE et nonce
+
+L'application envoie systématiquement un `code_challenge` PKCE (`S256`) et un
+`nonce`. Rien à configurer côté Keycloak ; pour l'imposer, client → onglet
+**Advanced** → *Proof Key for Code Exchange Code Challenge Method* = `S256`.
 
 ---
 
@@ -174,6 +201,10 @@ l'appartenance de l'utilisateur au groupe.
    SSO, le compte est provisionné et les appartenances sont appliquées ; elles sont
    réévaluées à chaque connexion.
 
+Seules les appartenances créées par le SSO (badge « via SSO ») sont synchronisées :
+une appartenance ajoutée manuellement dans un coffre n'est ni modifiée ni retirée
+par les groupes Keycloak.
+
 ## Dépannage
 
 | Symptôme | Cause probable |
@@ -182,3 +213,6 @@ l'appartenance de l'utilisateur au groupe.
 | Échec « émetteur invalide » | Issuer URL différente de celle du document de découverte (§1.4) |
 | Connexion OK mais aucun coffre attribué | Claim `groups` absent (§1.3, §2.3) ou nom de groupe ne correspondant pas au mapping |
 | Bouton SSO absent de la page de connexion | Fournisseur non activé dans la console admin |
+| `email_not_verified` | Email de l'utilisateur non vérifié côté Keycloak (§1.6) |
+| `identity_conflict` | L'adresse appartient à un compte déjà lié à une autre identité (§1.6) |
+| `invalid_redirect_uri` derrière un ingress | `APP_URL` absente ou différente de l'URL publique (§1.1) |

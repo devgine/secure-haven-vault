@@ -7,7 +7,7 @@
 import { getDb } from "../src/lib/db.server";
 import { provisionUser } from "../src/lib/session.server";
 import { getOrCreateDek, requireWorkspacePermission } from "../src/lib/vault.server";
-import { decryptField } from "../src/lib/crypto.server";
+import { decryptField, secretContext } from "../src/lib/crypto.server";
 import { ensureRootFolder, runImportBatch, MAX_ATTACHMENT_SIZE } from "../src/lib/import.server";
 import type { ImportItemPayload } from "../src/lib/keepass/mapping";
 
@@ -67,9 +67,9 @@ async function newJob(userId: string, workspaceId: string, strategy = "skip") {
 
 async function main() {
   const stamp = Date.now();
-  const ownerId = await provisionUser(`owner-${stamp}@test.local`, null, "Owner");
-  const viewerId = await provisionUser(`viewer-${stamp}@test.local`, null, "Viewer");
-  const outsiderId = await provisionUser(`out-${stamp}@test.local`, null, "Outsider");
+  const ownerId = await provisionUser(`owner-${stamp}@test.local`, null, { displayName: "Owner" });
+  const viewerId = await provisionUser(`viewer-${stamp}@test.local`, null, { displayName: "Viewer" });
+  const outsiderId = await provisionUser(`out-${stamp}@test.local`, null, { displayName: "Outsider" });
 
   const personal = (
     await sql<{ id: string }[]>`SELECT id FROM workspaces WHERE owner_id = ${ownerId} AND is_personal LIMIT 1`
@@ -119,7 +119,7 @@ async function main() {
   check("aucune valeur en clair en base", fields.every((f) => !f.ciphertext.includes("valeur-fictive-1")));
   check("champ TOTP marqué sensible", fields.find((f) => f.label === "TOTP")?.is_sensitive === true);
   const dek = await getOrCreateDek(personal);
-  const clear = await decryptField(dek, fields.find((f) => f.label === "Mot de passe")!.ciphertext);
+  const clear = await decryptField(dek, fields.find((f) => f.label === "Mot de passe")!.ciphertext, secretContext(stored.id));
   check("déchiffrement correct après stockage", clear === "valeur-fictive-1");
 
   // ── Idempotence / reprise / double soumission ──────────────────────────
@@ -178,7 +178,8 @@ async function main() {
         name: "Avec pièce jointe",
         attachments: [
           { filename: "ok.txt", mimeType: "text/plain", size: 4, dataB64: "AQIDBA==" },
-          { filename: "trop-gros.bin", mimeType: "application/octet-stream", size: MAX_ATTACHMENT_SIZE + 1, dataB64: "AA==" },
+          // Le client ment sur la taille : seule la taille réelle du contenu compte.
+          { filename: "trop-gros.bin", mimeType: "application/octet-stream", size: 1, dataB64: "A".repeat(Math.ceil(((MAX_ATTACHMENT_SIZE + 3) * 4) / 3)) },
         ],
       }),
     ],

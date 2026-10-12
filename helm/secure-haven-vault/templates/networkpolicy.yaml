@@ -1,0 +1,72 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "secure-haven-vault.fullname" . }}
+  labels:
+    {{- include "secure-haven-vault.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "secure-haven-vault.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: http
+          protocol: TCP
+      {{- with .Values.networkPolicy.appIngressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.postgresql.enabled }}
+---
+# PostgreSQL n'est joignable que par l'application, l'exporter de métriques,
+# ses propres instances (réplication) et l'opérateur CloudNativePG.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "secure-haven-vault.postgresqlName" . }}
+  labels:
+    {{- include "secure-haven-vault.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: {{ include "secure-haven-vault.postgresqlName" . }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "secure-haven-vault.selectorLabels" . | nindent 14 }}
+        {{- if include "secure-haven-vault.metricsEnabled" . }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus-postgres-exporter
+              app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- end }}
+        {{- with .Values.networkPolicy.postgresqlExtraIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: 5432
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: {{ include "secure-haven-vault.postgresqlName" . }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.cnpgOperatorNamespace }}
+      ports:
+        - port: 5432
+          protocol: TCP
+        - port: 8000
+          protocol: TCP
+    {{- if .Values.postgresql.enablePodMonitor }}
+    # Métriques natives de CloudNativePG.
+    - ports:
+        - port: 9187
+          protocol: TCP
+    {{- end }}
+{{- end }}
+{{- end }}

@@ -1,6 +1,5 @@
-// Middleware d'authentification des fonctions serveur.
-// Remplace l'ancien middleware Supabase : la session est un cookie httpOnly
-// validé contre la table `sessions` (empreinte SHA-256 du jeton).
+// Middleware d'authentification des fonctions serveur : la session est un
+// cookie httpOnly validé contre la table `sessions` (empreinte SHA-256 du jeton).
 import { createMiddleware } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/react-start/server";
 import { SESSION_COOKIE, readCookieHeader } from "./session-cookie";

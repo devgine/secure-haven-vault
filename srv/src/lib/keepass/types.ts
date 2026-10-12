@@ -78,6 +78,10 @@ const env = (import.meta as unknown as { env?: Record<string, string | undefined
 export const MAX_KEEPASS_ATTACHMENT_SIZE = num(env["VITE_MAX_KEEPASS_ATTACHMENT_SIZE"], 10 * 1024 * 1024);
 export const MAX_KEEPASS_TOTAL_IMPORT_SIZE = num(env["VITE_MAX_KEEPASS_TOTAL_IMPORT_SIZE"], 100 * 1024 * 1024);
 export const MAX_KEEPASS_ENTRY_COUNT = num(env["VITE_MAX_KEEPASS_ENTRY_COUNT"], 5000);
+// Plafond du contenu base64 de pièces jointes dans UNE requête d'import
+// (~12 Mo binaires) : borne la mémoire consommée côté serveur par lot.
+export const MAX_IMPORT_BATCH_ATTACHMENT_CHARS = 16_000_000;
+export const MAX_IMPORT_BATCH_ITEMS = 25;
 export const LARGE_FILE_WARNING_SIZE = 20 * 1024 * 1024;
 export const MAX_UNLOCK_ATTEMPTS = 5;
 

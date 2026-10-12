@@ -6,59 +6,222 @@ The chart is published as an OCI artifact in GitHub Container Registry:
 oci://ghcr.io/devgine/charts/secure-haven-vault
 ```
 
+It deploys the application (stateless, 2 replicas by default) and, unless an
+external database is used, a PostgreSQL cluster managed by the
+[CloudNativePG](https://cloudnative-pg.io) operator.
+
 ## Prerequisites
 
-- Kubernetes 1.27+
-- Helm 3.8+
-- A default StorageClass when the bundled PostgreSQL instance is enabled
+- Kubernetes 1.27+ and Helm 3.8+
+- The **CloudNativePG operator** installed in the cluster (unless
+  `postgresql.enabled=false`):
+
+  ```bash
+  helm repo add cnpg https://cloudnative-pg.github.io/charts
+  helm upgrade --install cnpg cnpg/cloudnative-pg \
+    --namespace cnpg-system --create-namespace
+  ```
+
+- A default StorageClass for the PostgreSQL volumes
+- A CNI that enforces NetworkPolicies (or `networkPolicy.enabled=false`)
 - Access to the application image `ghcr.io/devgine/secure-haven-vault`
-- Access to the chart package if it is private
 
-## Install directly from GHCR
+## Secrets
 
-Generate the encryption key and database password, then store them securely:
+In production, create the secrets yourself (External Secrets, Sealed Secrets,
+…) and reference them; nothing sensitive goes through `--set` or Git.
 
-```bash
-MASTER_ENCRYPTION_KEY="$(openssl rand -hex 32)"
-POSTGRES_PASSWORD="$(openssl rand -base64 32)"
-POSTGRES_EXPORTER_URL="postgres://exporter:${POSTGRES_PASSWORD}@secure-haven-vault-postgresql:5432/vault"
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: secure-haven-app
+type: Opaque
+stringData:
+  master-encryption-key: "<openssl rand -hex 32>"
+  admin-password: "<initial SUPER_ADMIN password, 12+ characters>"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: secure-haven-postgresql
+type: kubernetes.io/basic-auth
+stringData:
+  username: vault
+  password: "<any strong password — no URL encoding needed>"
 ```
 
-Install version `0.1.0` directly from GHCR:
+`values-production.yaml`:
+
+```yaml
+image:
+  tag: "0.5.0"            # never "latest"; the schema rejects it
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "24m"   # KeePass import batches
+  hosts:
+    - host: vault.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: vault-tls
+      hosts: [vault.example.com]
+
+config:
+  existingSecret: secure-haven-app
+  appUrl: https://vault.example.com
+  admin:
+    email: admin@example.com
+
+postgresql:
+  instances: 3
+  auth:
+    existingSecret: secure-haven-postgresql
+  backup:
+    retentionPolicy: 30d
+    barmanObjectStore:
+      destinationPath: s3://my-bucket/secure-haven-vault
+      s3Credentials:
+        accessKeyId: {name: backup-creds, key: ACCESS_KEY_ID}
+        secretAccessKey: {name: backup-creds, key: SECRET_ACCESS_KEY}
+  scheduledBackup:
+    enabled: true
+
+networkPolicy:
+  appIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+```
 
 ```bash
 helm upgrade --install secure-haven-vault \
   oci://ghcr.io/devgine/charts/secure-haven-vault \
-  --version 0.1.0 \
-  --namespace secure-haven-vault \
-  --create-namespace \
-  --set-string config.masterEncryptionKey="$MASTER_ENCRYPTION_KEY" \
-  --set-string postgresql.auth.password="$POSTGRES_PASSWORD" \
-  --set-string postgresqlExporter.datasource.url="$POSTGRES_EXPORTER_URL" \
-  --set ingress.enabled=true \
-  --set ingress.className=traefik \
-  --set ingress.hosts[0].host=vault.example.com
+  --version 1.0.0 \
+  --namespace secure-haven-vault --create-namespace \
+  --values values-production.yaml
 ```
 
-The SQL schema is applied only when PostgreSQL initializes an empty data directory.
-Back up `MASTER_ENCRYPTION_KEY` separately: losing it makes stored secrets
-undecryptable.
+### Local / throwaway install
 
-### Private GHCR packages
-
-Public packages can be pulled without authentication. For a private chart, create
-a GitHub personal access token with `read:packages`, then authenticate Helm:
+`--set` is acceptable for a local cluster only:
 
 ```bash
-export GHCR_USERNAME="<github-username>"
-export GHCR_TOKEN="<github-token>"
-
-echo "$GHCR_TOKEN" | helm registry login ghcr.io \
-  --username "$GHCR_USERNAME" \
-  --password-stdin
+helm upgrade --install secure-haven-vault ./helm/secure-haven-vault \
+  --namespace secure-haven-vault --create-namespace \
+  --set-string config.masterEncryptionKey="$(openssl rand -hex 32)" \
+  --set-string postgresql.auth.password="$(openssl rand -base64 32)" \
+  --set config.admin.email=admin@example.com \
+  --set-string config.admin.password='change-me-please-123' \
+  --set replicaCount=1
 ```
 
-If the application image is private, create an image pull secret:
+## What the application does at startup
+
+Each pod, before serving traffic (the readiness and startup probes wait for it):
+
+1. applies pending **schema migrations** (embedded in the image, serialized
+   across pods by a PostgreSQL advisory lock) — there is no `init.sql` to run,
+   including on an external database;
+2. creates the **SUPER_ADMIN** from `config.admin.email` and the
+   `admin-password` key when the platform has none. No account becomes
+   administrator by signing up;
+3. grants the metrics role access to its single view;
+4. re-wraps data keys after a master key rotation.
+
+## Master key
+
+Back up `master-encryption-key` separately: without it, stored secrets cannot
+be decrypted.
+
+**Rotation**: put the new key in `master-encryption-key` and the old one in
+`master-encryption-key-previous`, then restart the deployment. The log line
+`master_key_rewrap N` confirms the re-wrap; afterwards remove
+`master-encryption-key-previous` and restart again.
+
+## Metrics
+
+`prometheus-postgres-exporter.enabled=true` deploys the exporter with a custom
+`secret_expiry_days_remaining` gauge (labels: `secret_id`, `workspace_id` —
+never a secret name). The chart then creates a dedicated PostgreSQL role
+through CloudNativePG; it can read one view and nothing else.
+
+```yaml
+prometheus-postgres-exporter:
+  enabled: true
+postgresql:
+  metricsRole:
+    existingSecret: secure-haven-metrics   # basic-auth: username=exporter, password
+```
+
+The exporter's `config.datasource` defaults assume a release name containing
+`secure-haven-vault`. With another release name, set
+`config.datasource.host` to `<fullname>-postgresql-rw` and
+`config.datasource.passwordSecret.name` to your metrics secret.
+
+## External PostgreSQL
+
+```yaml
+postgresql:
+  enabled: false
+config:
+  existingSecret: secure-haven-app   # must also contain `database-url`
+```
+
+The database user must own the schema (it runs the migrations). The trigram
+search indexes are created when the `pg_trgm` extension is available and
+skipped otherwise.
+
+## Upgrading from 0.x
+
+Version 1.0.0 replaces the single-pod PostgreSQL StatefulSet with a
+CloudNativePG cluster. **Data is not migrated automatically**, and the secret
+format changes.
+
+1. Dump the old database while it is still running:
+
+   ```bash
+   kubectl -n secure-haven-vault exec secure-haven-vault-postgresql-0 -- \
+     pg_dump -U vault -Fc vault > vault.dump
+   ```
+
+2. Create the new secrets (the PostgreSQL secret is now `kubernetes.io/basic-auth`
+   with `username`/`password`; `database-url` is no longer needed), then upgrade
+   with `--set replicaCount=0` so the application does not initialise an empty
+   schema.
+3. Restore into the new primary, then scale the application back up:
+
+   ```bash
+   kubectl -n secure-haven-vault exec -i secure-haven-vault-postgresql-1 -- \
+     pg_restore -U postgres -d vault --no-owner --role=vault --clean --if-exists < vault.dump
+   ```
+
+4. Once verified, delete the old PVC `data-secure-haven-vault-postgresql-0`.
+
+The former `exporter` role had a password committed in the repository
+(`strong-password`) and read access to every table; the new one is created from
+your secret and restricted to one view.
+
+Other value changes: `image.tag` defaults to the chart `appVersion`,
+`postgresql.persistence.*` became `postgresql.storage.*`, and
+`postgresql.auth.passwordKey` is gone.
+
+## Private GHCR packages
+
+Public packages can be pulled without authentication. For a private chart,
+create a GitHub personal access token with `read:packages`:
+
+```bash
+echo "$GHCR_TOKEN" | helm registry login ghcr.io \
+  --username "$GHCR_USERNAME" --password-stdin
+```
+
+If the application image is private, create an image pull secret and reference
+it:
 
 ```bash
 kubectl create secret docker-registry ghcr-pull \
@@ -68,82 +231,18 @@ kubectl create secret docker-registry ghcr-pull \
   --docker-password="$GHCR_TOKEN"
 ```
 
-Then add it to your values:
-
 ```yaml
 imagePullSecrets:
   - name: ghcr-pull
 ```
 
-## Recommended: pre-created Kubernetes Secrets
-
-For GitOps, do not commit secret values. Create secrets through your secret
-manager:
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: secure-haven-app
-type: Opaque
-stringData:
-  master-encryption-key: "<64-hex-key>"
-  database-url: "postgres://vault:<password>@secure-haven-vault-postgresql:5432/vault"
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: secure-haven-postgresql
-type: Opaque
-stringData:
-  postgres-password: "<password>"
-```
-
-Reference them from a `values-production.yaml` file:
-
-```yaml
-config:
-  existingSecret: secure-haven-app
-postgresql:
-  auth:
-    existingSecret: secure-haven-postgresql
-```
-
-Then deploy:
-
-```bash
-helm upgrade --install secure-haven-vault \
-  oci://ghcr.io/devgine/charts/secure-haven-vault \
-  --version 0.1.0 \
-  --namespace secure-haven-vault \
-  --create-namespace \
-  --values values-production.yaml
-```
-
-## External PostgreSQL
-
-Use a pre-created secret containing `database-url` and
-`master-encryption-key`:
-
-```yaml
-postgresql:
-  enabled: false
-config:
-  existingSecret: secure-haven-app
-```
-
-Apply `db/init.sql` to the external database before starting the application.
-
 ## Publishing a new chart version
 
-Update `version` in `Chart.yaml`, then push the change to `main`. The
-`Publish Helm chart` workflow:
+Update `version` (and `appVersion` when the application is released) in
+`Chart.yaml`, then push to `main`. The `Publish Helm chart` workflow builds the
+dependencies from `Chart.lock`, lints, renders, packages and publishes the chart
+under `oci://ghcr.io/devgine/charts/secure-haven-vault` using the repository's
+automatic `GITHUB_TOKEN`.
 
-1. runs `helm lint`;
-2. renders the manifests;
-3. packages the chart;
-4. authenticates to GHCR with the repository's automatic `GITHUB_TOKEN`;
-5. publishes it under `oci://ghcr.io/devgine/charts/secure-haven-vault`.
-
-No additional Actions secret is required. The workflow needs the repository
-permission `packages: write`, which is declared in the workflow.
+The application image for a given `appVersion` is published by pushing the git
+tag `v<appVersion>`.

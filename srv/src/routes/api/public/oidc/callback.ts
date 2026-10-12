@@ -1,33 +1,55 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { jwtVerify, type JWTPayload } from "jose";
 import { audit } from "@/lib/audit.server";
-
-function errorRedirect(origin: string, message: string): Response {
-  const url = new URL("/auth", origin);
-  url.searchParams.set("sso_error", message);
-  return new Response(null, { status: 302, headers: { Location: url.toString() } });
-}
+import { roleAtLeast, type WorkspaceRole } from "@/lib/permissions";
+import { SESSION_COOKIE, readCookieHeader } from "@/lib/session-cookie";
 
 export const Route = createFileRoute("/api/public/oidc/callback")({
   server: {
     handlers: {
       GET: async ({ request }) => {
+        const { getDb } = await import("@/lib/db.server");
+        const {
+          OIDC_CLIENT_SECRET_CONTEXT,
+          OIDC_TX_COOKIE,
+          clearTransactionCookie,
+          discover,
+          jwksFor,
+          readTransaction,
+          requireVerifiedEmail,
+        } = await import("@/lib/oidc.server");
+        const { isSecureOrigin, publicOrigin } = await import("@/lib/request.server");
+
+        const origin = publicOrigin(request);
+        const secure = isSecureOrigin(request);
+        const fail = async (message: string, auditLabel?: string, actorEmail?: string) => {
+          if (auditLabel) {
+            await audit({
+              action: "auth.login_failed",
+              actorEmail: actorEmail ?? null,
+              targetType: "auth",
+              result: "failure",
+              targetLabel: auditLabel,
+            });
+          }
+          const target = new URL("/auth", origin);
+          target.searchParams.set("sso_error", message);
+          return new Response(null, {
+            status: 302,
+            headers: [
+              ["Location", target.toString()],
+              ["Set-Cookie", clearTransactionCookie(secure)],
+              ["Cache-Control", "no-store"],
+            ],
+          });
+        };
+
         const url = new URL(request.url);
-        const origin = url.origin;
         const code = url.searchParams.get("code");
         const state = url.searchParams.get("state");
-        const cookieState = request.headers
-          .get("cookie")
-          ?.split(";")
-          .map((c) => c.trim())
-          .find((c) => c.startsWith("oidc_state="))
-          ?.split("=")[1];
+        const tx = readTransaction(readCookieHeader(request.headers.get("cookie"), OIDC_TX_COOKIE));
+        if (!code || !state || !tx || state !== tx.state) return fail("invalid_state");
 
-        if (!code || !state || !cookieState || state !== cookieState) {
-          return errorRedirect(origin, "invalid_state");
-        }
-
-        const { getDb } = await import("@/lib/db.server");
         const sql = getDb();
         const providerRows = await sql<
           {
@@ -35,11 +57,10 @@ export const Route = createFileRoute("/api/public/oidc/callback")({
             issuer_url: string | null;
             client_id: string | null;
             client_secret_ciphertext: string | null;
-            token_endpoint: string | null;
             permission_mode: string;
           }[]
         >`
-          SELECT id, issuer_url, client_id, client_secret_ciphertext, token_endpoint, permission_mode
+          SELECT id, issuer_url, client_id, client_secret_ciphertext, permission_mode
           FROM oidc_providers
           WHERE enabled = true
           ORDER BY created_at ASC
@@ -47,62 +68,67 @@ export const Route = createFileRoute("/api/public/oidc/callback")({
         `;
         const provider = providerRows[0];
         if (!provider?.client_id || !provider.issuer_url || !provider.client_secret_ciphertext) {
-          return errorRedirect(origin, "sso_not_configured");
+          return fail("sso_not_configured");
         }
 
-        let tokenEndpoint = provider.token_endpoint;
-        let jwksUri: string | null = null;
-        if (!tokenEndpoint || !jwksUri) {
-          const discovery = await fetch(
-            `${provider.issuer_url}/.well-known/openid-configuration`,
-          ).then((r) => (r.ok ? r.json() : null));
-          tokenEndpoint = tokenEndpoint ?? discovery?.token_endpoint ?? null;
-          jwksUri = discovery?.jwks_uri ?? null;
-        }
-        if (!tokenEndpoint || !jwksUri) {
-          return errorRedirect(origin, "discovery_failed");
-        }
+        const discovery = await discover(provider.issuer_url);
+        if (!discovery) return fail("discovery_failed");
 
         const { decryptWithMaster } = await import("@/lib/crypto.server");
-        const clientSecret = await decryptWithMaster(provider.client_secret_ciphertext);
-        const redirectUri = `${origin}/api/public/oidc/callback`;
+        const clientSecret = await decryptWithMaster(
+          provider.client_secret_ciphertext,
+          OIDC_CLIENT_SECRET_CONTEXT,
+        );
 
-        const tokenResponse = await fetch(tokenEndpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            grant_type: "authorization_code",
-            code,
-            redirect_uri: redirectUri,
-            client_id: provider.client_id,
-            client_secret: clientSecret,
-          }),
-        });
-        if (!tokenResponse.ok) {
-          await audit({ action: "auth.login_failed", targetType: "auth", result: "failure", targetLabel: "oidc_token_exchange" });
-          return errorRedirect(origin, "token_exchange_failed");
-        }
-        const tokens = (await tokenResponse.json()) as { id_token?: string };
-        if (!tokens.id_token) return errorRedirect(origin, "no_id_token");
-
-        let claims;
+        let idToken: string | undefined;
         try {
-          const jwks = createRemoteJWKSet(new URL(jwksUri));
-          const verified = await jwtVerify(tokens.id_token, jwks, {
-            issuer: provider.issuer_url,
+          const tokenResponse = await fetch(discovery.tokenEndpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "authorization_code",
+              code,
+              redirect_uri: `${origin}/api/public/oidc/callback`,
+              client_id: provider.client_id,
+              client_secret: clientSecret,
+              code_verifier: tx.codeVerifier,
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (tokenResponse.ok) {
+            idToken = ((await tokenResponse.json()) as { id_token?: string }).id_token;
+          }
+        } catch {
+          // Traité comme un échec d'échange ci-dessous.
+        }
+        if (!idToken) return fail("token_exchange_failed", "oidc_token_exchange");
+
+        let claims: JWTPayload;
+        try {
+          const verified = await jwtVerify(idToken, jwksFor(discovery.jwksUri), {
+            issuer: discovery.issuer,
             audience: provider.client_id,
           });
           claims = verified.payload;
         } catch {
-          await audit({ action: "auth.login_failed", targetType: "auth", result: "failure", targetLabel: "oidc_invalid_token" });
-          return errorRedirect(origin, "invalid_token");
+          return fail("invalid_token", "oidc_invalid_token");
+        }
+        // Le jeton doit avoir été émis pour CETTE tentative de connexion.
+        if (claims["nonce"] !== tx.nonce) return fail("invalid_token", "oidc_nonce_mismatch");
+
+        const subject = claims.sub;
+        const email = (claims["email"] as string | undefined)?.toLowerCase();
+        if (!subject) return fail("invalid_token", "oidc_no_subject");
+        if (!email) return fail("no_email_claim");
+        // Sans email vérifié, n'importe quel utilisateur du fournisseur pourrait
+        // revendiquer l'adresse d'un compte existant.
+        if (requireVerifiedEmail() && claims["email_verified"] !== true) {
+          return fail("email_not_verified", "oidc_email_not_verified", email);
         }
 
-        const email = (claims["email"] as string | undefined)?.toLowerCase();
-        if (!email) return errorRedirect(origin, "no_email_claim");
-
-        const groupsClaim = (claims["groups"] as string[] | undefined) ??
-          ((claims["realm_access"] as { roles?: string[] } | undefined)?.roles) ??
+        const groupsClaim =
+          (claims["groups"] as string[] | undefined) ??
+          (claims["realm_access"] as { roles?: string[] } | undefined)?.roles ??
           [];
         const groups = Array.isArray(groupsClaim) ? groupsClaim : [];
         const displayName =
@@ -111,18 +137,34 @@ export const Route = createFileRoute("/api/public/oidc/callback")({
           email.split("@")[0] ??
           email;
 
-        // Find or create the application user (compte provisionné sans mot de
-        // passe local ; les inscriptions fermées bloquent aussi le SSO).
-        const { findOrCreateOidcUser } = await import("@/lib/session.server");
+        // Compte identifié par le `sub` ; provisionné sans mot de passe local au
+        // besoin (les inscriptions fermées bloquent aussi le SSO).
+        const { createSession, resolveOidcUser } = await import("@/lib/session.server");
         let userId: string;
         try {
-          userId = await findOrCreateOidcUser(email, displayName);
+          const resolved = await resolveOidcUser({
+            providerId: provider.id,
+            subject,
+            email,
+            displayName,
+          });
+          userId = resolved.userId;
+          if (resolved.linked) {
+            await audit({
+              userId,
+              actorEmail: email,
+              action: "auth.oidc_linked",
+              targetType: "auth",
+              targetLabel: provider.issuer_url,
+            });
+          }
         } catch (err) {
           const message = (err as Error).message;
-          return errorRedirect(
-            origin,
-            message === "signup_disabled" ? "signup_disabled" : "user_provisioning_failed",
-          );
+          if (message === "signup_disabled") return fail("signup_disabled");
+          if (message === "identity_conflict") {
+            return fail("identity_conflict", "oidc_identity_conflict", email);
+          }
+          return fail("user_provisioning_failed");
         }
 
         // Compte bloqué : refus de la session.
@@ -131,45 +173,51 @@ export const Route = createFileRoute("/api/public/oidc/callback")({
         `;
         const bannedUntil = userRows[0]?.banned_until;
         if (bannedUntil && new Date(bannedUntil).getTime() > Date.now()) {
-          await audit({
-            userId,
-            actorEmail: email,
-            action: "auth.login_failed",
-            targetType: "auth",
-            result: "failure",
-            targetLabel: "account_banned",
-          });
-          return errorRedirect(origin, "account_banned");
+          return fail("account_banned", "account_banned", email);
         }
 
-        // Synchronize workspace memberships from IdP group mappings.
+        // Synchronise les adhésions issues des groupes du fournisseur. Seules
+        // les adhésions gérées par le SSO sont touchées : une adhésion manuelle
+        // (y compris propriétaire) n'est ni convertie ni supprimée.
         if (provider.permission_mode !== "local") {
-          const mappings = await sql<
-            { workspace_id: string | null; workspace_role: string | null; oidc_group: string }[]
-          >`
-            SELECT workspace_id, workspace_role, oidc_group
-            FROM oidc_group_mappings
-            WHERE provider_id = ${provider.id}
-              AND oidc_group = ANY(${groups.length ? groups : ["__none__"]})
-          `;
-
-          await sql`
-            DELETE FROM workspace_members WHERE user_id = ${userId} AND managed_by_oidc = true
-          `;
-
-          for (const m of mappings) {
-            if (!m.workspace_id || !m.workspace_role) continue;
-            await sql`
-              INSERT INTO workspace_members (workspace_id, user_id, role, managed_by_oidc)
-              VALUES (${m.workspace_id}, ${userId}, ${m.workspace_role}::workspace_role, true)
-              ON CONFLICT (workspace_id, user_id)
-              DO UPDATE SET role = EXCLUDED.role, managed_by_oidc = true
+          await sql.begin(async (db) => {
+            const mappings = await db<
+              { workspace_id: string | null; workspace_role: WorkspaceRole | null }[]
+            >`
+              SELECT workspace_id, workspace_role
+              FROM oidc_group_mappings
+              WHERE provider_id = ${provider.id}
+                AND oidc_group = ANY(${groups.length ? groups : ["__none__"]})
             `;
-          }
+            // Plusieurs groupes peuvent viser le même coffre : le rôle le plus
+            // élevé est retenu.
+            const best = new Map<string, WorkspaceRole>();
+            for (const m of mappings) {
+              if (!m.workspace_id || !m.workspace_role) continue;
+              const current = best.get(m.workspace_id);
+              if (!current || !roleAtLeast(current, m.workspace_role)) {
+                best.set(m.workspace_id, m.workspace_role);
+              }
+            }
+            const kept = [...best.keys()];
+            await db`
+              DELETE FROM workspace_members
+              WHERE user_id = ${userId} AND managed_by_oidc = true
+                AND NOT (workspace_id = ANY(${db.array(kept)}::uuid[]))
+            `;
+            for (const [workspaceId, role] of best) {
+              await db`
+                INSERT INTO workspace_members (workspace_id, user_id, role, managed_by_oidc)
+                VALUES (${workspaceId}, ${userId}, ${role}::workspace_role, true)
+                ON CONFLICT (workspace_id, user_id)
+                DO UPDATE SET role = EXCLUDED.role
+                WHERE workspace_members.managed_by_oidc = true
+              `;
+            }
+          });
         }
 
         // Émet une session applicative (cookie httpOnly, empreinte SHA-256 en base).
-        const { createSession } = await import("@/lib/session.server");
         const session = await createSession(userId);
         await sql`UPDATE users SET last_sign_in_at = now() WHERE id = ${userId}`;
 
@@ -181,15 +229,14 @@ export const Route = createFileRoute("/api/public/oidc/callback")({
           targetLabel: provider.issuer_url,
         });
 
-        const secure = url.protocol === "https:" ? "; Secure" : "";
         return new Response(null, {
           status: 302,
           headers: [
             ["Location", `${origin}/`],
-            ["Set-Cookie", "oidc_state=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0"],
+            ["Set-Cookie", clearTransactionCookie(secure)],
             [
               "Set-Cookie",
-              `vault_session=${encodeURIComponent(session.token)}; Path=/; HttpOnly; SameSite=Lax${secure}; Max-Age=${7 * 24 * 3600}`,
+              `${SESSION_COOKIE}=${encodeURIComponent(session.token)}; Path=/; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}; Max-Age=${7 * 24 * 3600}`,
             ],
             ["Cache-Control", "no-store"],
           ],

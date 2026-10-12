@@ -1,5 +1,6 @@
 // Audit logging — server only. NEVER pass secret values here: metadata only.
 import { getDb } from "./db.server";
+import { clientIp, currentRequest } from "./request.server";
 
 export interface AuditEvent {
   userId?: string | null;
@@ -14,8 +15,12 @@ export interface AuditEvent {
 
 export async function audit(event: AuditEvent): Promise<void> {
   try {
+    // Origine de l'action : absente pour les tâches de démarrage.
+    const request = currentRequest();
+    const ip = request ? clientIp(request) : null;
+    const userAgent = request?.headers.get("user-agent")?.slice(0, 500) ?? null;
     await getDb()`
-      INSERT INTO audit_logs (user_id, actor_email, workspace_id, action, target_type, target_id, target_label, result)
+      INSERT INTO audit_logs (user_id, actor_email, workspace_id, action, target_type, target_id, target_label, result, ip, user_agent)
       VALUES (
         ${event.userId ?? null},
         ${event.actorEmail ?? null},
@@ -24,7 +29,9 @@ export async function audit(event: AuditEvent): Promise<void> {
         ${event.targetType ?? null},
         ${event.targetId ?? null},
         ${event.targetLabel ?? null},
-        ${event.result ?? "success"}
+        ${event.result ?? "success"},
+        ${ip},
+        ${userAgent}
       )
     `;
   } catch (err) {

@@ -133,6 +133,8 @@ export interface SecretVersionDto {
   changedByEmail: string | null;
   changedFields: string[];
   changedAt: string;
+  /** Vrai si un instantané chiffré existe pour cette version. */
+  restorable: boolean;
 }
 
 export interface AuditLogDto {
